@@ -21,7 +21,12 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv  # Optional: only needed for local dev
+except ModuleNotFoundError:
+    def load_dotenv() -> None:  # type: ignore[misc]
+        """No-op fallback when python-dotenv is not installed."""
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
