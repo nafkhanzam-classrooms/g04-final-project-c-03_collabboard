@@ -1,0 +1,21 @@
+-- =============================================================================
+-- CollabBoard — PostgreSQL Schema (Placeholder)
+-- =============================================================================
+-- Owner : M3 (Data/Sync)
+-- Sprint: Day 1
+--
+-- This file will contain the full DDL from DATABASE_SCHEMA.md.
+-- It is auto-executed by PostgreSQL on first container start via
+-- the docker-entrypoint-initdb.d mount.
+--
+-- M3 will populate this file with the complete schema definition.
+--
+-- Reference:
+--   - DATABASE_SCHEMA.md
+--   - POSTGRESQL_MIGRATION.md
+--   - DOCKER_DEPLOYMENT.md §3 (Volume Design — bind mount)
+-- =============================================================================
+
+-- TODO (M3, Day 1): Paste full DDL from DATABASE_SCHEMA.md here.
+-- Tables: users, rooms, room_members, canvas_objects, images,
+--         action_history, saved_canvases
