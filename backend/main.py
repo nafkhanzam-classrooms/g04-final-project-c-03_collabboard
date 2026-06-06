@@ -62,28 +62,42 @@ async def lifespan(app: FastAPI):
     Application lifespan manager.
 
     Startup:
-        - TODO (Day 2–3): Initialize asyncpg connection pool (M3)
+        - Initialize asyncpg connection pool (M3, Day 1) ✅
         - TODO (Day 3):   Initialize Redis connection pool (M1)
         - TODO (Day 5):   Start Redis pub/sub subscriber task (M1)
         - TODO (Day 9):   Start autosave background task (M3)
         - TODO (Day 9):   Start cleanup scheduler (M3)
 
     Shutdown:
-        - TODO: Close asyncpg pool
+        - Close asyncpg pool (M3, Day 1) ✅
         - TODO: Close Redis connection
         - TODO: Cancel background tasks
     """
     # -- Startup --------------------------------------------------------------
-    # Placeholder: pools and tasks will be initialized here in later sprints.
     print(f"[{SERVER_ID}] CollabBoard backend starting...")
     print(f"[{SERVER_ID}] DATABASE_URL = {DATABASE_URL}")
     print(f"[{SERVER_ID}] REDIS_URL    = {REDIS_URL}")
     print(f"[{SERVER_ID}] Serving frontend from: {FRONTEND_DIR}")
 
+    # Initialize asyncpg connection pool (M3)
+    try:
+        from backend.db import init_db_pool
+        await init_db_pool()
+    except Exception as exc:
+        print(f"[{SERVER_ID}] WARNING: Failed to initialize DB pool: {exc}")
+        print(f"[{SERVER_ID}] Server will start without database connectivity.")
+
     yield  # Application is running
 
     # -- Shutdown -------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend shutting down...")
+
+    # Close asyncpg connection pool (M3)
+    try:
+        from backend.db import close_db_pool
+        await close_db_pool()
+    except Exception as exc:
+        print(f"[{SERVER_ID}] WARNING: Error closing DB pool: {exc}")
 
 
 # ---------------------------------------------------------------------------
