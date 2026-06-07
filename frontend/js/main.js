@@ -2,24 +2,30 @@
 // CollabBoard — Main JS Entry Point
 // =============================================================================
 // Owner : M2 (Frontend Engineer)
-// Sprint: Day 1
+// Sprint: Day 1–2
 //
 // Initializes the application shell, binds core DOM elements, wires up
 // toolbar interactions (tool switching, color picker sync, sidebar toggle),
-// and prepares the module hook points for Day 2+ JS modules.
+// and integrates the NetworkManager for WebSocket connectivity.
+//
+// Day 2 additions:
+//   - NetworkManager integration (auto-connect, status bar updates)
+//   - AppState expanded with username, userId, roomId
+//   - Connection state reflected in status bar indicator
 //
 // Reference:
 //   - IMPLEMENTATION_PLAN.md §F1
 //   - SPECIFICATION.md §6.2
+//   - WEBSOCKET_PROTOCOL_EXTENSION.md §1, §9
 // =============================================================================
 
 'use strict';
 
 /**
- * CollabBoard — Application State (Day 1 shell)
+ * CollabBoard — Application State
  *
- * This object will be expanded as modules are added.  For Day 1, it only
- * tracks the active tool, current colors/stroke, and theme.
+ * Central state object for the entire frontend application.
+ * Expanded on Day 2 with network-related fields.
  */
 const AppState = {
     /** @type {'select'|'pencil'|'text'|'rectangle'|'circle'|'line'|'arrow'|'heart'|'image'} */
@@ -36,6 +42,17 @@ const AppState = {
 
     /** Whether the sidebar is open */
     sidebarOpen: false,
+
+    // -- Day 2: Network state ------------------------------------------------
+
+    /** Display name used for hello handshake */
+    username: null,
+
+    /** UUID assigned by server on hello_ack */
+    userId: null,
+
+    /** Current room ID (null = not in a room) */
+    roomId: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -208,10 +225,100 @@ function handleResize() {
 window.addEventListener('resize', handleResize);
 
 // ---------------------------------------------------------------------------
+// Network Integration (Day 2)
+// ---------------------------------------------------------------------------
+
+/** @type {NetworkManager} Singleton network manager */
+const network = new NetworkManager();
+
+/**
+ * Generate a temporary username for auto-connect.
+ * Will be replaced by the Room Modal input on Day 3.
+ * @returns {string}
+ */
+function _generateTempUsername() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let suffix = '';
+    for (let i = 0; i < 4; i++) {
+        suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `User_${suffix}`;
+}
+
+/**
+ * Update the status bar connection indicator.
+ * @param {'connected'|'disconnected'|'connecting'} visualState
+ * @param {string} label
+ */
+function updateConnectionStatus(visualState, label) {
+    const el = DOM.statusConnection;
+    // Remove all state classes
+    el.classList.remove(
+        'status-bar__indicator--connected',
+        'status-bar__indicator--disconnected',
+        'status-bar__indicator--connecting',
+    );
+    el.classList.add(`status-bar__indicator--${visualState}`);
+    // Update text (preserve the dot span)
+    const dot = el.querySelector('.status-bar__dot');
+    el.textContent = '';
+    if (dot) el.appendChild(dot);
+    el.appendChild(document.createTextNode(' ' + label));
+}
+
+// -- Subscribe to network state changes --------------------------------------
+network.on('state_change', (newState, _oldState) => {
+    switch (newState) {
+        case ConnectionState.CONNECTING:
+            updateConnectionStatus('connecting', 'Connecting…');
+            break;
+        case ConnectionState.CONNECTED:
+            updateConnectionStatus('connecting', 'Handshaking…');
+            break;
+        case ConnectionState.IDENTIFIED:
+            updateConnectionStatus('connected', 'Connected');
+            break;
+        case ConnectionState.DISCONNECTED:
+            updateConnectionStatus('disconnected', 'Disconnected');
+            break;
+        case ConnectionState.RECONNECTING:
+            updateConnectionStatus('connecting', 'Reconnecting…');
+            break;
+    }
+});
+
+// -- Subscribe to hello_ack --------------------------------------------------
+network.on('hello_ack', (data) => {
+    AppState.userId = data.user_id;
+    console.log(`[CollabBoard] Identified: ${AppState.username} (${data.user_id})`);
+});
+
+// -- Subscribe to errors -----------------------------------------------------
+network.on('error', (data) => {
+    console.warn(`[CollabBoard] Server error: [${data.code}] ${data.message}`);
+});
+
+// -- Subscribe to reconnect events -------------------------------------------
+network.on('reconnecting', ({ attempt, maxAttempts, delay }) => {
+    console.log(`[CollabBoard] Reconnect attempt ${attempt}/${maxAttempts} in ${delay}ms`);
+});
+
+network.on('reconnected', () => {
+    console.log('[CollabBoard] Reconnected. Re-join room if needed.');
+    // Day 3: auto re-send join_room with stored roomId
+});
+
+network.on('reconnect_failed', () => {
+    console.error('[CollabBoard] All reconnect attempts failed.');
+    updateConnectionStatus('disconnected', 'Connection lost');
+    // TODO (Day 3): Show a reconnect button in the UI
+});
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 (function init() {
-    console.log('[CollabBoard] Frontend initialized — Day 1 scaffold');
+    console.log('[CollabBoard] Frontend initialized — Day 2');
     console.log('[CollabBoard] Press Ctrl+Shift+D to toggle dark mode');
 
     // Set initial canvas cursor
@@ -222,4 +329,11 @@ window.addEventListener('resize', handleResize);
     if (ctx) {
         console.log(`[CollabBoard] Canvas 2D context ready (${DOM.canvas.width}×${DOM.canvas.height})`);
     }
+
+    // -- Auto-connect with temporary username ---------------------------------
+    // Day 3 will replace this with the Room Modal flow.
+    const tempUsername = _generateTempUsername();
+    AppState.username = tempUsername;
+    console.log(`[CollabBoard] Auto-connecting as "${tempUsername}"...`);
+    network.connect(tempUsername);
 })();
