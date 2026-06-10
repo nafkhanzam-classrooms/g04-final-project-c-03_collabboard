@@ -2,7 +2,7 @@
 # CollabBoard — FastAPI Application Entry Point
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 3 — Redis session state integration
+# Sprint: Day 4 — Room join/leave flows
 #
 # This module creates the FastAPI application, registers the health-check HTTP
 # endpoint, implements the WebSocket route with hello/hello_ack handshake,
@@ -21,10 +21,15 @@
 #   - Redis session deletion on WebSocket disconnect
 #   - Updated /health endpoint with Redis connectivity status
 #
+# Day 4 changes:
+#   - Routed create_room, join_room, leave_room to rooms.py handlers
+#   - Disconnect cleanup now handles users who were in a room
+#   - /health endpoint shows active room count
+#
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §1, §2
-#   - API_CONTRACT.md §1 (hello), §3 (ping/pong), §GET /health
-#   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §8 (heartbeat)
+#   - API_CONTRACT.md §1 (hello), §3 (ping/pong), §4-6 (rooms), §GET /health
+#   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §2-3 (rooms), §8 (heartbeat)
 #   - DISTRIBUTED_SYSTEM_DESIGN.md §7 (Session Lifecycle), §8.1 (Redis Schema)
 #   - DOCKER_DEPLOYMENT.md §8 (backend responsibilities)
 # =============================================================================
@@ -57,6 +62,13 @@ from backend.redis_client import (
     create_session,
     delete_session,
 )
+from backend.rooms import (
+    handle_create_room,
+    handle_join_room,
+    handle_leave_room,
+    handle_disconnect_cleanup,
+)
+from backend.sync import handle_op
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -193,7 +205,7 @@ async def health_check():
             "server_version": SERVER_VERSION,
             "uptime_seconds": uptime,
             "active_connections": manager.active_count,
-            "active_rooms": 0,         # TODO: wire to RoomManager (Day 4)
+            "active_rooms": manager.active_room_count,
             "postgres": pg_status,
             "redis": redis_status,
         },
@@ -321,6 +333,13 @@ async def websocket_endpoint(websocket: WebSocket):
         client = manager.register(websocket, hello.username)
         user_id = client.user_id
 
+        # Insert user into PostgreSQL (Day 2/4 integration)
+        try:
+            from backend import db
+            await db.upsert_user(client.user_id, client.username)
+        except Exception as exc:
+            print(f"[{SERVER_ID}] WARNING: Failed to upsert user {client.user_id}: {exc}")
+
         # Create Redis session state (Day 3, M1)
         # HSET session:{user_id} server_id <id> username <name> room_id ""
         # EXPIRE session:{user_id} 300
@@ -387,13 +406,16 @@ async def websocket_endpoint(websocket: WebSocket):
             # alive but the feature is pending.
 
             if client.state == SessionState.IDENTIFIED:
-                if msg_type in ("create_room", "join_room"):
-                    # Day 3 — Room management (M1)
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "code": "NOT_IMPLEMENTED",
-                        "message": f"'{msg_type}' will be implemented in Day 3.",
-                    }))
+                if msg_type == "create_room":
+                    await handle_create_room(
+                        websocket, client, manager, SERVER_ID,
+                    )
+                    continue
+
+                if msg_type == "join_room":
+                    await handle_join_room(
+                        websocket, client, data, manager, SERVER_ID,
+                    )
                     continue
 
                 if msg_type in (
@@ -410,16 +432,66 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
             elif client.state == SessionState.IN_ROOM:
-                # Day 4+ — op routing, cursor relay, etc.
+                # Room management while InRoom
+                if msg_type == "leave_room":
+                    await handle_leave_room(
+                        websocket, client, manager, SERVER_ID,
+                    )
+                    continue
+
+                if msg_type in ("create_room", "join_room"):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "code": "ALREADY_IN_ROOM",
+                        "message": "Leave current room first",
+                    }))
+                    continue
+
+                # Canvas operations — op routing (Day 4, M3)
+                if msg_type == "op":
+                    if not client.room_id:
+                        continue
+
+                    result = await handle_op(
+                        user_id=client.user_id,
+                        username=client.username,
+                        room_id=client.room_id,
+                        data=data,
+                    )
+                    if result["status"] == "ok":
+                        # Send op_ack to sender
+                        await websocket.send_text(
+                            json.dumps(result["op_ack"])
+                        )
+                        # Broadcast op_broadcast to other local clients
+                        await manager.broadcast_to_room(
+                            client.room_id,
+                            result["op_broadcast"],
+                            exclude_user_id=client.user_id,
+                        )
+                        # Cross-server relay via Redis pub/sub
+                        await redis_client.publish_to_room(
+                            room_id=client.room_id,
+                            server_id=SERVER_ID,
+                            msg_type="op_broadcast",
+                            payload=result["op_broadcast"],
+                        )
+                    else:
+                        # Send op_rejected to sender
+                        await websocket.send_text(
+                            json.dumps(result["op_rejected"])
+                        )
+                    continue
+
+                # Day 5+ — cursor relay, save/load, etc.
                 if msg_type in (
-                    "op", "cursor_move", "cursor_chat",
+                    "cursor_move", "cursor_chat",
                     "save_canvas", "load_canvas", "image_request",
-                    "leave_room",
                 ):
                     await websocket.send_text(json.dumps({
                         "type": "error",
                         "code": "NOT_IMPLEMENTED",
-                        "message": f"'{msg_type}' will be implemented in Day 4+.",
+                        "message": f"'{msg_type}' will be implemented in Day 5+.",
                     }))
                     continue
 
@@ -440,6 +512,21 @@ async def websocket_endpoint(websocket: WebSocket):
         # PHASE 3: Cleanup
         # ==================================================================
         if user_id is not None:
+            # Get client state BEFORE removing from manager (need room_id)
+            client_state = manager.get_client(user_id)
+
+            # Clean up room state if user was in a room (Day 4)
+            if client_state is not None and client_state.room_id is not None:
+                try:
+                    await handle_disconnect_cleanup(
+                        client_state, manager, SERVER_ID,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[{SERVER_ID}] WARNING: Disconnect room cleanup "
+                        f"failed for {user_id}: {exc}"
+                    )
+
             removed = manager.disconnect(user_id)
             if removed:
                 print(
@@ -450,8 +537,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Clean up Redis session state (Day 3, M1)
             await delete_session(user_id)
-
-            # TODO (Day 4): Broadcast user_left to room if client was in a room
 
 
 # ---------------------------------------------------------------------------

@@ -211,3 +211,153 @@ async def refresh_session_ttl(user_id: str) -> bool:
     except Exception as exc:
         print(f"[redis] WARNING: Failed to refresh TTL for {user_id}: {exc}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Room Membership Helpers (Day 4, M1)
+# ---------------------------------------------------------------------------
+
+ROOM_MEMBERS_PREFIX: str = "room:"
+ROOM_MEMBERS_SUFFIX: str = ":members"
+
+
+def _room_members_key(room_id: str) -> str:
+    """Build the Redis key for a room's member set: ``room:{room_id}:members``."""
+    return f"{ROOM_MEMBERS_PREFIX}{room_id}{ROOM_MEMBERS_SUFFIX}"
+
+
+def _room_channel(room_id: str) -> str:
+    """Build the Redis pub/sub channel name for a room: ``room:{room_id}``."""
+    return f"room:{room_id}"
+
+
+async def update_session_room(user_id: str, room_id: str) -> bool:
+    """
+    Update the ``room_id`` field in a user's Redis session hash.
+
+    Called on ``join_room`` (set to room_id) and ``leave_room`` (set to "").
+
+    Redis command (per DISTRIBUTED_SYSTEM_DESIGN.md §8.1):
+        HSET session:{user_id} room_id <room_id>
+        EXPIRE session:{user_id} 300
+
+    Args:
+        user_id: UUID v4 of the user.
+        room_id: Room code to set, or empty string ``""`` on leave.
+
+    Returns:
+        True if updated successfully, False if Redis unavailable.
+    """
+    if redis_conn is None:
+        return False
+
+    try:
+        key = _session_key(user_id)
+        await redis_conn.hset(key, "room_id", room_id)
+        await redis_conn.expire(key, SESSION_TTL_SECONDS)
+        return True
+    except Exception as exc:
+        print(f"[redis] WARNING: Failed to update session room for {user_id}: {exc}")
+        return False
+
+
+async def add_room_member(room_id: str, user_id: str) -> bool:
+    """
+    Add a user to the Redis room membership set.
+
+    Redis command (per DISTRIBUTED_SYSTEM_DESIGN.md §8.1):
+        SADD room:{room_id}:members {user_id}
+
+    Args:
+        room_id: 6-character room code.
+        user_id: UUID v4 string.
+
+    Returns:
+        True if added, False if Redis unavailable.
+    """
+    if redis_conn is None:
+        return False
+
+    try:
+        key = _room_members_key(room_id)
+        await redis_conn.sadd(key, user_id)
+        return True
+    except Exception as exc:
+        print(f"[redis] WARNING: Failed to SADD room member {user_id} to {room_id}: {exc}")
+        return False
+
+
+async def remove_room_member(room_id: str, user_id: str) -> bool:
+    """
+    Remove a user from the Redis room membership set.
+
+    Redis command (per DISTRIBUTED_SYSTEM_DESIGN.md §8.1):
+        SREM room:{room_id}:members {user_id}
+
+    Args:
+        room_id: 6-character room code.
+        user_id: UUID v4 string.
+
+    Returns:
+        True if removed, False if Redis unavailable.
+    """
+    if redis_conn is None:
+        return False
+
+    try:
+        key = _room_members_key(room_id)
+        await redis_conn.srem(key, user_id)
+        return True
+    except Exception as exc:
+        print(f"[redis] WARNING: Failed to SREM room member {user_id} from {room_id}: {exc}")
+        return False
+
+
+async def publish_to_room(
+    room_id: str,
+    server_id: str,
+    msg_type: str,
+    payload: dict,
+) -> bool:
+    """
+    Publish a message to the Redis pub/sub channel for a room.
+
+    Wraps the payload in the envelope format from
+    DISTRIBUTED_SYSTEM_DESIGN.md §8:
+
+    .. code-block:: json
+
+        {
+            "_server_id": "backend-1",
+            "_type": "user_joined",
+            "payload": { ... }
+        }
+
+    The subscriber task (Day 5) will filter ``_server_id == MY_SERVER_ID``
+    to prevent echo.
+
+    Args:
+        room_id: 6-character room code (channel = ``room:{room_id}``).
+        server_id: This backend's SERVER_ID.
+        msg_type: The ``_type`` field (e.g. ``"user_joined"``).
+        payload: The actual message dict to relay to clients.
+
+    Returns:
+        True if published, False if Redis unavailable.
+    """
+    if redis_conn is None:
+        return False
+
+    try:
+        import json
+        channel = _room_channel(room_id)
+        envelope = json.dumps({
+            "_server_id": server_id,
+            "_type": msg_type,
+            "payload": payload,
+        })
+        await redis_conn.publish(channel, envelope)
+        return True
+    except Exception as exc:
+        print(f"[redis] WARNING: Failed to publish to {room_id}: {exc}")
+        return False

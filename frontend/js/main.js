@@ -324,11 +324,9 @@ network.on('reconnect_failed', () => {
     // Set initial canvas cursor
     DOM.canvas.style.cursor = 'default';
 
-    // Get 2D context (ready for Day 4 canvas.js)
-    const ctx = DOM.canvas.getContext('2d');
-    if (ctx) {
-        console.log(`[CollabBoard] Canvas 2D context ready (${DOM.canvas.width}×${DOM.canvas.height})`);
-    }
+    // Initialize Canvas & Tools (Day 4)
+    if (window.CollabCanvas) window.CollabCanvas.init();
+    if (window.ToolManager) window.ToolManager.init();
 
     // -- Show Room Modal ------------------------------------------------------
     // Day 3: Show the room join/create modal on load

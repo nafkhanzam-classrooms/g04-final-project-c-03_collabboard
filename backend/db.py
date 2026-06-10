@@ -32,16 +32,20 @@ Exposes:
     get_room_members()   — List members with usernames (JOIN).
     RoomFullError        — Raised when a room is at max capacity (8).
 
-TODO (Day 4+, M3):
-    - insert_canvas_object, update_object (JSONB merge), soft_delete_object
+Day 4 (M3):
+    - insert_canvas_object — atomic seq + insert in one transaction
+
+TODO (Day 5+, M3):
+    - update_object (JSONB merge), soft_delete_object
     - load_canvas snapshot query
 """
 
 from __future__ import annotations
 
+import json as _json
 import os
 import uuid as _uuid
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import asyncpg
 
@@ -456,3 +460,180 @@ async def get_room_members(room_id: str) -> List[asyncpg.Record]:
             room_id,
         )
     return rows
+
+
+# =========================================================================
+# CRUD — room queries (Day 4, M1)
+# =========================================================================
+
+async def room_exists(room_id: str) -> bool:
+    """
+    Check whether a room with the given ID exists in the ``rooms`` table.
+
+    Used by M1's ``join_room`` handler to validate the room_id before
+    attempting to insert a room member.
+
+    Args:
+        room_id: 6-character room code.
+
+    Returns:
+        ``True`` if the room exists, ``False`` otherwise.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            "SELECT 1 FROM rooms WHERE room_id = $1",
+            room_id,
+        )
+    return row is not None
+
+
+async def count_active_rooms() -> int:
+    """
+    Count rooms with ``status = 'active'``.
+
+    Used by M1's ``create_room`` handler to enforce the MAX_ROOMS (10) limit.
+
+    Returns:
+        Integer count of active rooms.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM rooms WHERE status = 'active'",
+        )
+    return count
+
+
+async def get_room_seq(room_id: str) -> Optional[int]:
+    """
+    Get the current sequence counter for a room.
+
+    Used by M1 to populate the ``seq`` field in ``canvas_snapshot``
+    when a user joins a room.
+
+    Args:
+        room_id: 6-character room code.
+
+    Returns:
+        The current ``seq_counter`` value, or ``None`` if the room
+        does not exist.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            "SELECT seq_counter FROM rooms WHERE room_id = $1",
+            room_id,
+        )
+    return row
+
+
+# =========================================================================
+# CRUD — canvas_objects (Day 4, M3)
+# =========================================================================
+
+async def insert_canvas_object(
+    room_id: str,
+    user_id: str,
+    obj_type: str,
+    z_index: int,
+    color: str,
+    stroke_width: int,
+    properties: dict,
+) -> Tuple[int, str, str]:
+    """
+    Atomically insert a canvas object and increment the room's seq_counter.
+
+    Both operations execute inside a **single transaction** so the
+    ``seq_counter`` is rolled back if the ``INSERT`` fails (no sequence
+    gaps).  This is the critical write path for every ``op: "add"``
+    operation.
+
+    Transaction flow (per POSTGRESQL_MIGRATION.md §6):
+        1. ``UPDATE rooms SET seq_counter = seq_counter + 1 ... RETURNING``
+        2. ``INSERT INTO canvas_objects (...) RETURNING obj_id, created_at``
+
+    Args:
+        room_id: 6-character room code.
+        user_id: UUID v4 string of the creating user.
+        obj_type: One of the 8 ``obj_type`` enum values.
+        z_index: Draw order (≥ 0).
+        color: ``#RRGGBB`` hex string.
+        stroke_width: Stroke width in pixels (≥ 0).
+        properties: Type-specific JSONB properties dict.
+
+    Returns:
+        A 3-tuple ``(seq, obj_id, created_at)``:
+            - seq (int):  The new monotonic sequence number.
+            - obj_id (str):  UUID v4 string of the created object.
+            - created_at (str):  ISO 8601 timestamp string.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized or
+            the room does not exist (UPDATE matched 0 rows).
+        asyncpg.ForeignKeyViolationError: If ``user_id`` does not exist.
+        asyncpg.DataError: If ``obj_type`` is not in the PG enum.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    obj_id = _uuid.uuid4()
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Step 1: Atomically increment seq_counter
+            seq_row = await conn.fetchrow(
+                """
+                UPDATE rooms
+                SET seq_counter   = seq_counter + 1,
+                    last_activity = now(),
+                    is_dirty      = TRUE
+                WHERE room_id = $1
+                RETURNING seq_counter
+                """,
+                room_id,
+            )
+            if seq_row is None:
+                raise RuntimeError(f"Room {room_id} not found")
+
+            seq = seq_row["seq_counter"]
+
+            # Step 2: Insert the canvas object
+            obj_row = await conn.fetchrow(
+                """
+                INSERT INTO canvas_objects
+                    (obj_id, room_id, created_by, obj_type,
+                     z_index, color, stroke_width, properties)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                RETURNING obj_id, created_at
+                """,
+                obj_id,
+                room_id,
+                _uuid.UUID(user_id),
+                obj_type,
+                z_index,
+                color,
+                stroke_width,
+                _json.dumps(properties),
+            )
+
+    return (
+        seq,
+        str(obj_row["obj_id"]),
+        obj_row["created_at"].isoformat(),
+    )

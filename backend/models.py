@@ -32,9 +32,10 @@ TODO (Day 3+):
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -108,3 +109,182 @@ class ErrorMessage(BaseModel):
     type: Literal["error"] = "error"
     code: str
     message: str
+
+
+# =========================================================================
+# Op Validation Models (Day 4, M3)
+# =========================================================================
+# Per API_CONTRACT.md §9 — each obj_type has its own required properties.
+# These models are used by sync.py to validate incoming add operations.
+# =========================================================================
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+VALID_OBJ_TYPES = frozenset(
+    {"pencil", "text", "rectangle", "circle", "line", "arrow", "heart", "image"}
+)
+"""Valid obj_type values (matching the PostgreSQL ``obj_type`` ENUM)."""
+
+
+# ---------------------------------------------------------------------------
+# Per-type property models
+# ---------------------------------------------------------------------------
+
+class PencilProperties(BaseModel):
+    """Pencil: freehand polyline. Requires ≥ 2 ``[x, y]`` points."""
+
+    points: list = Field(..., min_length=2)
+
+    @field_validator("points")
+    @classmethod
+    def validate_points(cls, v: list) -> list:
+        if not isinstance(v, list) or len(v) < 2:
+            raise ValueError("points must have at least 2 elements")
+        for i, pt in enumerate(v):
+            if not isinstance(pt, (list, tuple)) or len(pt) != 2:
+                raise ValueError(f"Point {i} must be [x, y]")
+            if not all(isinstance(c, (int, float)) for c in pt):
+                raise ValueError(f"Point {i} coordinates must be numbers")
+        return v
+
+
+class TextProperties(BaseModel):
+    """Text label. Position + content + font size."""
+
+    x: int
+    y: int
+    content: str = Field(..., min_length=1)
+    font_size: int = Field(..., ge=8, le=144)
+
+
+class RectangleProperties(BaseModel):
+    """Rectangle. Position + dimensions + optional fill."""
+
+    x: int
+    y: int
+    width: int = Field(..., gt=0)
+    height: int = Field(..., gt=0)
+    fill_color: Optional[str] = None
+
+    @field_validator("fill_color")
+    @classmethod
+    def validate_fill(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _HEX_COLOR_RE.match(v):
+            raise ValueError("fill_color must be a valid hex color")
+        return v
+
+
+class CircleProperties(BaseModel):
+    """Circle. Centre + radius + optional fill."""
+
+    cx: int
+    cy: int
+    radius: int = Field(..., gt=0)
+    fill_color: Optional[str] = None
+
+    @field_validator("fill_color")
+    @classmethod
+    def validate_fill(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _HEX_COLOR_RE.match(v):
+            raise ValueError("fill_color must be a valid hex color")
+        return v
+
+
+class LineProperties(BaseModel):
+    """Straight line between two points."""
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class ArrowProperties(BaseModel):
+    """Arrow (line with head) between two points."""
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class HeartProperties(BaseModel):
+    """Heart shape. Centre + size."""
+
+    cx: int
+    cy: int
+    size: int = Field(..., gt=0)
+
+
+class ImageProperties(BaseModel):
+    """Embedded image. Position + dimensions + base64 payload."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+    image_data: str = Field(..., min_length=1)
+    original_filename: str = Field(..., min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# Property dispatcher
+# ---------------------------------------------------------------------------
+
+PROPERTY_VALIDATORS: dict[str, type[BaseModel]] = {
+    "pencil": PencilProperties,
+    "text": TextProperties,
+    "rectangle": RectangleProperties,
+    "circle": CircleProperties,
+    "line": LineProperties,
+    "arrow": ArrowProperties,
+    "heart": HeartProperties,
+    "image": ImageProperties,
+}
+"""Maps ``obj_type`` → Pydantic model for property validation."""
+
+
+# ---------------------------------------------------------------------------
+# Add-operation payload model
+# ---------------------------------------------------------------------------
+
+class AddObjectPayload(BaseModel):
+    """
+    Validates the ``object`` dict inside an ``op: "add"`` message.
+
+    Reference: API_CONTRACT.md §9
+
+    Validation steps:
+        1. ``obj_type`` must be one of the 8 valid types.
+        2. ``color`` must be a valid ``#RRGGBB`` hex string.
+        3. ``properties`` must satisfy the type-specific property model.
+    """
+
+    obj_type: str
+    z_index: int = Field(..., ge=0)
+    color: str
+    stroke_width: int = Field(..., ge=0)
+    properties: dict
+
+    @field_validator("obj_type")
+    @classmethod
+    def validate_obj_type(cls, v: str) -> str:
+        if v not in VALID_OBJ_TYPES:
+            raise ValueError(f"Invalid obj_type: '{v}'")
+        return v
+
+    @field_validator("color")
+    @classmethod
+    def validate_color(cls, v: str) -> str:
+        if not _HEX_COLOR_RE.match(v):
+            raise ValueError("color must be a valid #RRGGBB hex string")
+        return v
+
+    @model_validator(mode="after")
+    def validate_properties_for_type(self) -> "AddObjectPayload":
+        """Dispatch ``properties`` to the correct per-type validator."""
+        validator_cls = PROPERTY_VALIDATORS.get(self.obj_type)
+        if validator_cls is None:
+            raise ValueError(f"No property validator for obj_type: {self.obj_type}")
+        validator_cls.model_validate(self.properties)
+        return self
