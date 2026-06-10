@@ -330,10 +330,8 @@ network.on('reconnect_failed', () => {
         console.log(`[CollabBoard] Canvas 2D context ready (${DOM.canvas.width}×${DOM.canvas.height})`);
     }
 
-    // -- Auto-connect with temporary username ---------------------------------
-    // Day 3 will replace this with the Room Modal flow.
-    const tempUsername = _generateTempUsername();
-    AppState.username = tempUsername;
-    console.log(`[CollabBoard] Auto-connecting as "${tempUsername}"...`);
-    network.connect(tempUsername);
+    // -- Show Room Modal ------------------------------------------------------
+    // Day 3: Show the room join/create modal on load
+    DOM.roomModal.setAttribute('aria-hidden', 'false');
+    DOM.modalUsername.focus();
 })();

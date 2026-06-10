@@ -2,7 +2,7 @@
 # CollabBoard — FastAPI Application Entry Point
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 2 — WebSocket hello handshake
+# Sprint: Day 3 — Redis session state integration
 #
 # This module creates the FastAPI application, registers the health-check HTTP
 # endpoint, implements the WebSocket route with hello/hello_ack handshake,
@@ -15,10 +15,17 @@
 #   - Added ping/pong app-level heartbeat support
 #   - Wired active_connections count into /health endpoint
 #
+# Day 3 changes:
+#   - Integrated async Redis client (init/close in lifespan)
+#   - Redis session creation on successful hello handshake
+#   - Redis session deletion on WebSocket disconnect
+#   - Updated /health endpoint with Redis connectivity status
+#
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §1, §2
 #   - API_CONTRACT.md §1 (hello), §3 (ping/pong), §GET /health
 #   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §8 (heartbeat)
+#   - DISTRIBUTED_SYSTEM_DESIGN.md §7 (Session Lifecycle), §8.1 (Redis Schema)
 #   - DOCKER_DEPLOYMENT.md §8 (backend responsibilities)
 # =============================================================================
 
@@ -43,6 +50,13 @@ from pydantic import ValidationError
 
 from backend.connection import ConnectionManager, SessionState
 from backend.models import ErrorMessage, HelloAckMessage, HelloMessage
+from backend import redis_client
+from backend.redis_client import (
+    init_redis,
+    close_redis,
+    create_session,
+    delete_session,
+)
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -80,15 +94,15 @@ async def lifespan(app: FastAPI):
     Application lifespan manager.
 
     Startup:
-        - Initialize asyncpg connection pool (M3, Day 1) ✅
-        - TODO (Day 3):   Initialize Redis connection pool (M1)
+        - Initialize asyncpg connection pool (M3, Day 1) [DONE]
+        - Initialize async Redis connection (M1, Day 3) [DONE]
         - TODO (Day 5):   Start Redis pub/sub subscriber task (M1)
         - TODO (Day 9):   Start autosave background task (M3)
         - TODO (Day 9):   Start cleanup scheduler (M3)
 
     Shutdown:
-        - Close asyncpg pool (M3, Day 1) ✅
-        - TODO: Close Redis connection
+        - Close asyncpg pool (M3, Day 1) [DONE]
+        - Close Redis connection (M1, Day 3) [DONE]
         - TODO: Cancel background tasks
     """
     # -- Startup --------------------------------------------------------------
@@ -105,10 +119,23 @@ async def lifespan(app: FastAPI):
         print(f"[{SERVER_ID}] WARNING: Failed to initialize DB pool: {exc}")
         print(f"[{SERVER_ID}] Server will start without database connectivity.")
 
+    # Initialize async Redis connection (M1, Day 3)
+    try:
+        await init_redis()
+    except Exception as exc:
+        print(f"[{SERVER_ID}] WARNING: Failed to initialize Redis: {exc}")
+        print(f"[{SERVER_ID}] Server will start without Redis connectivity.")
+
     yield  # Application is running
 
     # -- Shutdown -------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend shutting down...")
+
+    # Close Redis connection (M1, Day 3)
+    try:
+        await close_redis()
+    except Exception as exc:
+        print(f"[{SERVER_ID}] WARNING: Error closing Redis: {exc}")
 
     # Close asyncpg connection pool (M3)
     try:
@@ -139,12 +166,24 @@ async def health_check():
     Health endpoint for Docker HEALTHCHECK and Nginx upstream monitoring.
 
     Returns 200 with status info when server is up.
-    Full implementation (with DB/Redis connectivity checks) will be added
-    when connection pools are wired up (Day 3+).
+    Includes Redis connectivity check (Day 3) and DB pool status.
 
     Reference: API_CONTRACT.md §GET /health
     """
     uptime = int(time.time() - _start_time)
+
+    # Check Redis connectivity
+    redis_status = "disconnected"
+    if redis_client.redis_conn is not None:
+        try:
+            await redis_client.redis_conn.ping()
+            redis_status = "connected"
+        except Exception:
+            redis_status = "error"
+
+    # Check PostgreSQL connectivity
+    from backend.db import pool as db_pool
+    pg_status = "connected" if db_pool is not None else "disconnected"
 
     return JSONResponse(
         status_code=200,
@@ -154,9 +193,9 @@ async def health_check():
             "server_version": SERVER_VERSION,
             "uptime_seconds": uptime,
             "active_connections": manager.active_count,
-            "active_rooms": 0,         # TODO: wire to RoomManager (Day 3)
-            "postgres": "pending",     # TODO: check asyncpg pool
-            "redis": "pending",        # TODO: check Redis connection
+            "active_rooms": 0,         # TODO: wire to RoomManager (Day 4)
+            "postgres": pg_status,
+            "redis": redis_status,
         },
     )
 
@@ -282,6 +321,15 @@ async def websocket_endpoint(websocket: WebSocket):
         client = manager.register(websocket, hello.username)
         user_id = client.user_id
 
+        # Create Redis session state (Day 3, M1)
+        # HSET session:{user_id} server_id <id> username <name> room_id ""
+        # EXPIRE session:{user_id} 300
+        session_ok = await create_session(
+            user_id=client.user_id,
+            server_id=SERVER_ID,
+            username=client.username,
+        )
+
         # Build and send hello_ack
         ack = HelloAckMessage(
             user_id=client.user_id,
@@ -292,7 +340,8 @@ async def websocket_endpoint(websocket: WebSocket):
         print(
             f"[{SERVER_ID}] Client connected: "
             f"{client.username} ({client.user_id}) "
-            f"[{manager.active_count} active]"
+            f"[{manager.active_count} active] "
+            f"(redis_session={'ok' if session_ok else 'skipped'})"
         )
 
         # ==================================================================
@@ -399,7 +448,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"[{manager.active_count} active]"
                 )
 
-            # TODO (Day 3): Clean up Redis session state
+            # Clean up Redis session state (Day 3, M1)
+            await delete_session(user_id)
+
             # TODO (Day 4): Broadcast user_left to room if client was in a room
 
 

@@ -2,7 +2,7 @@
 # CollabBoard — Connection Manager
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 2 — WebSocket connection tracking & hello handshake
+# Sprint: Day 3 — In-memory connection registry + room index
 #
 # This module manages active WebSocket connections, tracks client session
 # state, and provides broadcast utilities for room-level messaging.
@@ -14,11 +14,15 @@
 #   - SERVER_FULL enforcement
 #   - Graceful disconnect cleanup
 #
-# Day 3 will add Redis session state (HSET session:{user_id}) with 300s TTL.
+# Day 3 scope:
+#   - Added room_connections reverse index (dict[room_id, set[user_id]])
+#   - Helper methods: add_to_room(), remove_from_room(), get_room_connections()
+#   - These enable fast local broadcast without scanning all clients
 #
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §B2
 #   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §10 (broadcast)
+#   - DISTRIBUTED_SYSTEM_DESIGN.md §4 (Per-Backend WebSocket Handling)
 #   - API_CONTRACT.md §1 (hello / hello_ack)
 # =============================================================================
 """
@@ -28,12 +32,9 @@ Provides:
     - Client registration / deregistration with UUID assignment
     - hello / hello_ack handshake orchestration
     - Session state tracking (Connected → Identified → InRoom)
+    - Room-level connection index for fast local broadcast
     - Broadcast to room members (exclude-sender pattern)
     - SERVER_FULL capacity enforcement
-
-TODO (Day 3):
-    - Integrate Redis session state (HSET session:{user_id}, TTL 300s)
-    - Map active connections to their respective backend SERVER_ID
 """
 
 from __future__ import annotations
@@ -107,6 +108,11 @@ class ConnectionManager:
 
     def __init__(self) -> None:
         self.clients: dict[str, ClientState] = {}
+        # Reverse index: room_id → set of user_ids with local WebSocket
+        # connections in that room. Enables O(1) room membership lookup
+        # and fast local broadcast without scanning all clients.
+        # (DISTRIBUTED_SYSTEM_DESIGN.md §4: "Local room → [websocket] mapping")
+        self.room_connections: dict[str, set[str]] = {}
 
     # -- Properties -----------------------------------------------------------
 
@@ -207,3 +213,72 @@ class ConnectionManager:
                 await client.websocket.send_text(json.dumps(message))
             except Exception:
                 pass
+
+    # -- Room Index -----------------------------------------------------------
+
+    def add_to_room(self, room_id: str, user_id: str) -> None:
+        """
+        Track a user's WebSocket in the local room index.
+
+        Called when a user joins a room. Updates both the ClientState
+        and the room_connections reverse index.
+
+        Args:
+            room_id: The room being joined.
+            user_id: The user joining the room.
+        """
+        client = self.clients.get(user_id)
+        if client is not None:
+            client.room_id = room_id
+            client.state = SessionState.IN_ROOM
+        if room_id not in self.room_connections:
+            self.room_connections[room_id] = set()
+        self.room_connections[room_id].add(user_id)
+
+    def remove_from_room(self, room_id: str, user_id: str) -> None:
+        """
+        Remove a user's WebSocket from the local room index.
+
+        Called when a user leaves a room or disconnects. Cleans up
+        both the ClientState and the room_connections reverse index.
+        Removes the room entry entirely when the last local member leaves.
+
+        Args:
+            room_id: The room being left.
+            user_id: The user leaving the room.
+        """
+        client = self.clients.get(user_id)
+        if client is not None:
+            client.room_id = None
+            client.state = SessionState.IDENTIFIED
+        if room_id in self.room_connections:
+            self.room_connections[room_id].discard(user_id)
+            if not self.room_connections[room_id]:
+                del self.room_connections[room_id]
+
+    def get_room_connections(self, room_id: str) -> list[ClientState]:
+        """
+        Get all locally-connected clients in a specific room.
+
+        Returns a list of ClientState objects for all users with an
+        active WebSocket on *this* backend instance that are in the
+        given room. Used for local-first broadcast
+        (DISTRIBUTED_SYSTEM_DESIGN.md §4).
+
+        Args:
+            room_id: The room to query.
+
+        Returns:
+            List of ClientState objects (may be empty).
+        """
+        user_ids = self.room_connections.get(room_id, set())
+        return [
+            self.clients[uid]
+            for uid in user_ids
+            if uid in self.clients
+        ]
+
+    @property
+    def active_room_count(self) -> int:
+        """Number of rooms with at least one local WebSocket connection."""
+        return len(self.room_connections)

@@ -2,10 +2,10 @@
 # CollabBoard — Database Layer
 # =============================================================================
 # Owner : M3 (Data/Sync)
-# Sprint: Day 1–2 — Pool Setup + Initial CRUD
+# Sprint: Day 1–3 — Pool Setup + CRUD + Room Membership
 #
-# This module manages the asyncpg connection pool lifecycle and will expose
-# CRUD operations for all database tables in future sprints.
+# This module manages the asyncpg connection pool lifecycle and exposes
+# CRUD operations for all database tables.
 #
 # Pool configuration values are from POSTGRESQL_MIGRATION.md §7:
 #   min_size=5, max_size=20, max_inactive_connection_lifetime=60,
@@ -14,7 +14,7 @@
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §B1
 #   - DATABASE_SCHEMA.md (source of truth for DDL)
-#   - POSTGRESQL_MIGRATION.md §7 (connection pooling strategy)
+#   - POSTGRESQL_MIGRATION.md §6 (transaction strategy), §7 (pooling)
 # =============================================================================
 """
 Database: asyncpg pool setup, CRUD operations.
@@ -26,10 +26,12 @@ Exposes:
     upsert_user()     — Insert a new user row with a pre-assigned UUID.
     insert_room()     — Insert a new room row.
     next_seq()        — Atomically increment and return a room's seq_counter.
+    insert_room_member() — Add a user to a room (with capacity check).
+    remove_room_member() — Remove a user from a room.
+    count_room_members() — Count current members in a room.
+    get_room_members()   — List members with usernames (JOIN).
+    RoomFullError        — Raised when a room is at max capacity (8).
 
-TODO (Day 3, M3):
-    - insert_room_member, remove_room_member, count_room_members
-    - Room capacity validation (≤ 8 users)
 TODO (Day 4+, M3):
     - insert_canvas_object, update_object (JSONB merge), soft_delete_object
     - load_canvas snapshot query
@@ -39,9 +41,32 @@ from __future__ import annotations
 
 import os
 import uuid as _uuid
-from typing import Optional
+from typing import List, Optional
 
 import asyncpg
+
+
+# ---------------------------------------------------------------------------
+# Custom Exceptions
+# ---------------------------------------------------------------------------
+
+MAX_ROOM_MEMBERS: int = 8
+"""Maximum number of users allowed in a single room (spec A3)."""
+
+
+class RoomFullError(Exception):
+    """Raised when a room has reached its maximum capacity of 8 users.
+
+    The M1 WebSocket handler should catch this and send a
+    ``join_rejected`` message with reason ``room_full``.
+    """
+
+    def __init__(self, room_id: str, current_count: int) -> None:
+        self.room_id = room_id
+        self.current_count = current_count
+        super().__init__(
+            f"Room {room_id} is full ({current_count}/{MAX_ROOM_MEMBERS})"
+        )
 
 # ---------------------------------------------------------------------------
 # Module-level pool reference
@@ -248,3 +273,186 @@ async def next_seq(room_id: str) -> Optional[int]:
     if row is None:
         return None
     return row["seq_counter"]
+
+
+# =========================================================================
+# CRUD — room_members (Day 3, M3)
+# =========================================================================
+
+async def insert_room_member(
+    user_id: str,
+    room_id: str,
+) -> asyncpg.Record:
+    """
+    Add a user to a room, enforcing the 8-user capacity limit.
+
+    Uses a **SERIALIZABLE** transaction to atomically:
+        1. ``SELECT COUNT(*) FROM room_members WHERE room_id = $1``
+        2. If count >= 8 → raise ``RoomFullError``
+        3. ``INSERT INTO room_members (user_id, room_id)``
+        4. ``UPDATE rooms SET last_activity = now() WHERE room_id = $1``
+
+    The SERIALIZABLE isolation level prevents the race condition where
+    two users join simultaneously and both see count=7, pushing the
+    room to 9 users (per POSTGRESQL_MIGRATION.md §6).
+
+    If a serialization conflict occurs (``asyncpg.SerializationError``),
+    the caller should retry the operation once.
+
+    Args:
+        user_id: UUID v4 string of the joining user.
+        room_id: 6-character room code.
+
+    Returns:
+        The inserted ``asyncpg.Record`` with columns:
+        ``user_id``, ``room_id``, ``joined_at``.
+
+    Raises:
+        RoomFullError: If the room already has 8 members.
+        RuntimeError: If the connection pool is not initialized.
+        asyncpg.SerializationError: On serialization conflict (caller
+            should retry).
+        asyncpg.ForeignKeyViolationError: If user_id or room_id
+            does not exist.
+        asyncpg.UniqueViolationError: If the user is already in the room.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction(isolation='serializable'):
+            # Step 1: Check current member count
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM room_members WHERE room_id = $1",
+                room_id,
+            )
+
+            # Step 2: Enforce capacity
+            if count >= MAX_ROOM_MEMBERS:
+                raise RoomFullError(room_id, count)
+
+            # Step 3: Insert member row
+            row = await conn.fetchrow(
+                """
+                INSERT INTO room_members (user_id, room_id)
+                VALUES ($1, $2)
+                RETURNING user_id, room_id, joined_at
+                """,
+                _uuid.UUID(user_id),
+                room_id,
+            )
+
+            # Step 4: Touch room last_activity
+            await conn.execute(
+                "UPDATE rooms SET last_activity = now() WHERE room_id = $1",
+                room_id,
+            )
+
+    return row
+
+
+async def remove_room_member(
+    user_id: str,
+    room_id: str,
+) -> bool:
+    """
+    Remove a user from a room.
+
+    Idempotent — returns ``False`` if the membership row did not exist.
+    Also updates ``rooms.last_activity`` to ``now()``.
+
+    The schema's ``ON DELETE CASCADE`` on ``room_members`` handles
+    automatic cleanup when a user or room is deleted from the parent
+    table. This function handles the *explicit* leave/disconnect case.
+
+    Args:
+        user_id: UUID v4 string of the leaving user.
+        room_id: 6-character room code.
+
+    Returns:
+        ``True`` if a row was deleted, ``False`` if the user was not
+        a member of the room.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            result = await conn.execute(
+                "DELETE FROM room_members WHERE user_id = $1 AND room_id = $2",
+                _uuid.UUID(user_id),
+                room_id,
+            )
+
+            # result is a status string like 'DELETE 1' or 'DELETE 0'
+            deleted = result == "DELETE 1"
+
+            if deleted:
+                await conn.execute(
+                    "UPDATE rooms SET last_activity = now() WHERE room_id = $1",
+                    room_id,
+                )
+
+    return deleted
+
+
+async def count_room_members(room_id: str) -> int:
+    """
+    Count the current number of members in a room.
+
+    Args:
+        room_id: 6-character room code.
+
+    Returns:
+        Integer count of members (0 if room has no members or
+        does not exist).
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM room_members WHERE room_id = $1",
+            room_id,
+        )
+    return count
+
+
+async def get_room_members(room_id: str) -> List[asyncpg.Record]:
+    """
+    List all members of a room with their usernames.
+
+    Performs a JOIN with the ``users`` table to retrieve display names.
+    Used by M1 to populate the ``members`` array in ``join_ack``.
+
+    Args:
+        room_id: 6-character room code.
+
+    Returns:
+        List of ``asyncpg.Record``, each with columns:
+        ``user_id`` (UUID), ``username`` (str), ``joined_at`` (datetime).
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT rm.user_id, u.username, rm.joined_at
+            FROM room_members rm
+            JOIN users u ON u.user_id = rm.user_id
+            WHERE rm.room_id = $1
+            ORDER BY rm.joined_at
+            """,
+            room_id,
+        )
+    return rows
