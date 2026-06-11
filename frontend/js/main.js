@@ -324,9 +324,10 @@ network.on('reconnect_failed', () => {
     // Set initial canvas cursor
     DOM.canvas.style.cursor = 'default';
 
-    // Initialize Canvas & Tools (Day 4)
+    // Initialize Canvas, Tools, and Cursor overlay (Day 4 / Day 7)
     if (window.CollabCanvas) window.CollabCanvas.init();
     if (window.ToolManager) window.ToolManager.init();
+    if (window.CursorManager) window.CursorManager.init();
 
     // -- Show Room Modal ------------------------------------------------------
     // Day 3: Show the room join/create modal on load

@@ -2,7 +2,7 @@
 // CollabBoard — Canvas Renderer
 // =============================================================================
 // Owner : M2 (Frontend Engineer)
-// Sprint: Day 4
+// Sprint: Day 7
 //
 // Manages the HTML5 Canvas, maintains the authoritative list of committed
 // drawing objects, and runs the requestAnimationFrame render loop.
@@ -12,6 +12,13 @@
 //   - 60fps render loop clearing and redrawing all objects.
 //   - Delegates rendering of the in-progress tool stroke to ToolManager.
 //   - Listens to network events for incoming snapshot and broadcast data.
+//   - Full shape rendering: pencil, rectangle, circle, line, arrow, heart, text.
+//   - Stores snapshot seq number for future undo/redo tracking.
+//
+// Day 7 additions:
+//   - CursorManager: parses cursor_update events, renders remote cursors
+//     as absolute-positioned HTML overlays (not drawn on canvas).
+//   - Emits throttled cursor_move (50ms) on mouse motion.
 // =============================================================================
 
 'use strict';
@@ -32,6 +39,13 @@ class CanvasRenderer {
          * @type {Map<string, Object>} 
          */
         this.objects = new Map();
+
+        /**
+         * Last known sequence number from the server.
+         * Updated on canvas_snapshot and op_ack/op_broadcast.
+         * @type {number}
+         */
+        this.lastSeq = 0;
         
         /**
          * Queue of temporary IDs awaiting op_ack for 'add' operations.
@@ -71,8 +85,13 @@ class CanvasRenderer {
      * @param {Object} data - The canvas_snapshot payload
      */
     handleSnapshot(data) {
-        console.log(`[CollabCanvas] Received snapshot with ${data.objects.length} objects.`);
+        console.log(`[CollabCanvas] Received snapshot with ${data.objects.length} objects, seq=${data.seq}.`);
         
+        // Store the server's current sequence number
+        if (data.seq !== undefined) {
+            this.lastSeq = data.seq;
+        }
+
         // Preserve local pending temp objects
         const preservedTemps = new Map();
         for (const [id, obj] of this.objects.entries()) {
@@ -81,19 +100,20 @@ class CanvasRenderer {
             }
         }
 
-        // Wipe authoritative state
+        // Wipe authoritative state — snapshot is the server's truth
         this.objects.clear();
         
+        // Clear tombstones — snapshot is a fresh baseline
+        this.tombstones.clear();
+
         // Restore local pending temp objects
         for (const [id, obj] of preservedTemps.entries()) {
             this.objects.set(id, obj);
         }
 
-        // Load snapshot objects (ignoring any that are tombstoned)
+        // Load snapshot objects
         for (const obj of data.objects) {
-            if (!this.tombstones.has(obj.obj_id)) {
-                this.objects.set(obj.obj_id, obj);
-            }
+            this.objects.set(obj.obj_id, obj);
         }
     }
 
@@ -238,9 +258,114 @@ class CanvasRenderer {
                     this.ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);
                 }
                 break;
-                
-            // Other shapes (circle, line, etc.) will be added in Day 5
+
+            case 'circle': {
+                const { cx, cy, radius } = properties;
+                this.ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                if (properties.fill_color) {
+                    this.ctx.fill();
+                }
+                if (stroke_width > 0) {
+                    this.ctx.stroke();
+                }
+                break;
+            }
+
+            case 'line':
+                this.ctx.moveTo(properties.x1, properties.y1);
+                this.ctx.lineTo(properties.x2, properties.y2);
+                this.ctx.stroke();
+                break;
+
+            case 'arrow': {
+                // Draw the line
+                const { x1, y1, x2, y2 } = properties;
+                this.ctx.moveTo(x1, y1);
+                this.ctx.lineTo(x2, y2);
+                this.ctx.stroke();
+
+                // Draw the arrowhead
+                const headLen = Math.max(10, stroke_width * 3);
+                const angle = Math.atan2(y2 - y1, x2 - x1);
+                this.ctx.beginPath();
+                this.ctx.moveTo(x2, y2);
+                this.ctx.lineTo(
+                    x2 - headLen * Math.cos(angle - Math.PI / 6),
+                    y2 - headLen * Math.sin(angle - Math.PI / 6)
+                );
+                this.ctx.moveTo(x2, y2);
+                this.ctx.lineTo(
+                    x2 - headLen * Math.cos(angle + Math.PI / 6),
+                    y2 - headLen * Math.sin(angle + Math.PI / 6)
+                );
+                this.ctx.stroke();
+                break;
+            }
+
+            case 'heart': {
+                // Heart shape using cubic Bezier curves, parametrized by cx, cy, size
+                const { cx: hx, cy: hy, size } = properties;
+                const s = size / 2;
+                this.ctx.moveTo(hx, hy + s * 0.4);
+                // Left side
+                this.ctx.bezierCurveTo(
+                    hx - s * 1.2, hy - s * 0.6,
+                    hx - s * 0.6, hy - s * 1.4,
+                    hx, hy - s * 0.6
+                );
+                // Right side
+                this.ctx.bezierCurveTo(
+                    hx + s * 0.6, hy - s * 1.4,
+                    hx + s * 1.2, hy - s * 0.6,
+                    hx, hy + s * 0.4
+                );
+                this.ctx.closePath();
+                if (properties.fill_color) {
+                    this.ctx.fill();
+                } else {
+                    // Hearts look better filled with the stroke color by default
+                    this.ctx.fillStyle = color;
+                    this.ctx.fill();
+                }
+                if (stroke_width > 0) {
+                    this.ctx.stroke();
+                }
+                break;
+            }
+
+            case 'text': {
+                const fontSize = properties.font_size || 16;
+                this.ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+                this.ctx.fillStyle = color;
+                this.ctx.textBaseline = 'top';
+                this.ctx.fillText(properties.content || '', properties.x, properties.y);
+                // Text is not stroked by default
+                break;
+            }
+
+            case 'image':
+                // Image rendering is a Day 10 task (requires HTMLImageElement cache)
+                // For now, draw a placeholder rectangle with a label
+                if (properties.width && properties.height) {
+                    this.ctx.strokeStyle = '#888';
+                    this.ctx.setLineDash([6, 4]);
+                    this.ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);
+                    this.ctx.setLineDash([]);
+                    this.ctx.fillStyle = '#aaa';
+                    this.ctx.font = '14px Inter, system-ui, sans-serif';
+                    this.ctx.textBaseline = 'middle';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(
+                        '🖼 Image',
+                        properties.x + properties.width / 2,
+                        properties.y + properties.height / 2
+                    );
+                    this.ctx.textAlign = 'start';
+                }
+                break;
+
             default:
+                console.warn(`[CollabCanvas] Unknown obj_type: ${obj_type}`);
                 break;
         }
     }
@@ -248,3 +373,190 @@ class CanvasRenderer {
 
 // Export as global
 window.CollabCanvas = new CanvasRenderer();
+
+
+// =============================================================================
+// CursorManager — Remote Cursor HTML Overlays
+// =============================================================================
+// Renders remote users' cursors as absolutely-positioned HTML elements
+// inside #cursor-overlay. NOT drawn on the canvas (avoids smearing).
+//
+// Also emits outgoing cursor_move messages, throttled to 50ms.
+// =============================================================================
+
+class CursorManager {
+    constructor() {
+        this.overlay = document.getElementById('cursor-overlay');
+        this.canvas = document.getElementById('canvas');
+
+        /**
+         * Map of user_id → { element: HTMLDivElement, username: string }
+         * @type {Map<string, {element: HTMLDivElement, username: string}>}
+         */
+        this.cursors = new Map();
+
+        // Throttle state for outgoing cursor_move
+        this._lastCursorSendTime = 0;
+        this._cursorMoveThrottleMs = 50; // 20 msgs/sec max
+
+        // Bind
+        this._onMouseMove = this._onMouseMove.bind(this);
+    }
+
+    init() {
+        console.log('[CursorManager] Initialized.');
+
+        // Listen for incoming cursor updates
+        if (window.network) {
+            window.network.on('cursor_update', (data) => this.handleCursorUpdate(data));
+            window.network.on('user_left', (data) => this.removeCursor(data.user_id));
+        }
+
+        // Emit outgoing cursor_move on mouse motion over the canvas
+        this.canvas.addEventListener('mousemove', this._onMouseMove);
+    }
+
+    /**
+     * Converts logical 1920x1080 coordinates to CSS pixel offsets
+     * relative to the canvas container.
+     * @param {number} logicalX
+     * @param {number} logicalY
+     * @returns {{px: number, py: number}}
+     */
+    logicalToCSS(logicalX, logicalY) {
+        const rect = this.canvas.getBoundingClientRect();
+        const px = (logicalX / 1920) * rect.width;
+        const py = (logicalY / 1080) * rect.height;
+        return { px, py };
+    }
+
+    /**
+     * Converts a CSS mouse position to logical 1920x1080 coordinates.
+     * @param {MouseEvent} e
+     * @returns {{x: number, y: number}}
+     */
+    cssToLogical(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = Math.round(((e.clientX - rect.left) / rect.width) * 1920);
+        const y = Math.round(((e.clientY - rect.top) / rect.height) * 1080);
+        return {
+            x: Math.max(0, Math.min(1920, x)),
+            y: Math.max(0, Math.min(1080, y)),
+        };
+    }
+
+    /**
+     * Generates a deterministic hue from a username string.
+     * @param {string} username
+     * @returns {number} hue 0–359
+     */
+    _hueFromUsername(username) {
+        return Array.from(username).reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 360;
+    }
+
+    /**
+     * Creates the SVG cursor arrow icon.
+     * @param {string} fillColor
+     * @returns {string} SVG markup
+     */
+    _cursorSVG(fillColor) {
+        return `<svg width="16" height="20" viewBox="0 0 16 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M1 1L1 17L5.5 12.5L9.5 19L12 18L8 11L14 11L1 1Z"
+                  fill="${fillColor}" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>`;
+    }
+
+    /**
+     * Handles an incoming cursor_update from the server.
+     * Creates or moves the DOM element for this remote cursor.
+     * @param {{ user_id: string, username: string, x: number, y: number }} data
+     */
+    handleCursorUpdate(data) {
+        // Ignore our own cursor (server should exclude, but guard anyway)
+        if (data.user_id === window.AppState?.userId) return;
+
+        const { px, py } = this.logicalToCSS(data.x, data.y);
+
+        let entry = this.cursors.get(data.user_id);
+        if (!entry) {
+            // Create a new cursor element
+            entry = this._createCursorElement(data.user_id, data.username);
+            this.cursors.set(data.user_id, entry);
+        }
+
+        // Update position via transform (GPU accelerated, avoids layout thrash)
+        entry.element.style.transform = `translate(${px}px, ${py}px)`;
+    }
+
+    /**
+     * Creates the DOM structure for a remote cursor.
+     * @param {string} userId
+     * @param {string} username
+     * @returns {{element: HTMLDivElement, username: string}}
+     */
+    _createCursorElement(userId, username) {
+        const hue = this._hueFromUsername(username);
+        const color = `hsl(${hue}, 70%, 50%)`;
+
+        const el = document.createElement('div');
+        el.className = 'remote-cursor';
+        el.dataset.userId = userId;
+        el.innerHTML = this._cursorSVG(color);
+
+        // Username label
+        const label = document.createElement('div');
+        label.className = 'remote-cursor__label';
+        label.textContent = username;
+        label.style.backgroundColor = color;
+        el.appendChild(label);
+
+        this.overlay.appendChild(el);
+
+        return { element: el, username };
+    }
+
+    /**
+     * Removes a remote cursor from the DOM.
+     * @param {string} userId
+     */
+    removeCursor(userId) {
+        const entry = this.cursors.get(userId);
+        if (entry) {
+            entry.element.remove();
+            this.cursors.delete(userId);
+        }
+    }
+
+    /**
+     * Removes all remote cursors (e.g. on room leave).
+     */
+    removeAll() {
+        for (const [userId, entry] of this.cursors) {
+            entry.element.remove();
+        }
+        this.cursors.clear();
+    }
+
+    /**
+     * Mouse move handler — emits throttled cursor_move to the server.
+     * @param {MouseEvent} e
+     */
+    _onMouseMove(e) {
+        const now = performance.now();
+        if (now - this._lastCursorSendTime < this._cursorMoveThrottleMs) return;
+        this._lastCursorSendTime = now;
+
+        if (!window.network || !window.network.isIdentified) return;
+        if (!window.AppState?.roomId) return;
+
+        const { x, y } = this.cssToLogical(e);
+        window.network.send({
+            type: 'cursor_move',
+            x: x,
+            y: y,
+        });
+    }
+}
+
+// Export as global
+window.CursorManager = new CursorManager();
