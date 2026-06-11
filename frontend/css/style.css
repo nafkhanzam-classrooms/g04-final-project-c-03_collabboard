@@ -803,18 +803,37 @@ ul {
     border-width: 0;
 }
 
-/* Cursor chat bubble (rendered by JS in Day 8) */
+/* Cursor chat bubble (Day 8 — speech bubble overlay, auto-dismiss after 4s) */
 .cursor-chat-bubble {
     position: absolute;
     padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-md) 4px;
     font-size: 12px;
     font-weight: 500;
     color: var(--color-text-inverse);
-    white-space: nowrap;
+    white-space: normal;
+    max-width: 220px;
     pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     animation: bubble-appear 200ms ease-out, bubble-fade 4s ease-in forwards;
     animation-delay: 0s, 0s;
+}
+
+.cursor-chat-bubble__name {
+    font-size: 10px;
+    font-weight: 700;
+    opacity: 0.85;
+    letter-spacing: 0.3px;
+    text-transform: capitalize;
+}
+
+.cursor-chat-bubble__message {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    word-break: break-word;
 }
 
 @keyframes bubble-appear {
@@ -825,6 +844,57 @@ ul {
 @keyframes bubble-fade {
     0%, 80% { opacity: 1; }
     100%    { opacity: 0; }
+}
+
+/* Cursor chat input (Day 8 — floating text entry triggered by / key) */
+.cursor-chat-input-wrapper {
+    position: absolute;
+    z-index: 15; /* above cursor-overlay (10), below toolbar (100) */
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    animation: bubble-appear 150ms ease-out;
+}
+
+.cursor-chat-input-slash {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    font-size: 13px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+    box-shadow: var(--shadow-sm);
+}
+
+.cursor-chat-input {
+    width: 220px;
+    height: 32px;
+    padding: 0 var(--space-md);
+    border: 2px solid var(--color-accent);
+    border-radius: var(--radius-full);
+    background: var(--color-surface);
+    color: var(--color-text-primary);
+    font-size: 13px;
+    font-family: var(--font-primary);
+    outline: none;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 0 0 1px var(--color-accent-light);
+    transition: box-shadow var(--transition-fast);
+}
+
+.cursor-chat-input:focus {
+    box-shadow: 0 4px 24px rgba(91, 95, 199, 0.25), 0 0 0 3px var(--color-accent-light);
+}
+
+.cursor-chat-input::placeholder {
+    color: var(--color-text-tertiary);
+    font-size: 12px;
 }
 
 /* Toast notification (future use) */

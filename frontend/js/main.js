@@ -53,6 +53,20 @@ const AppState = window.AppState = {
 
     /** Current room ID (null = not in a room) */
     roomId: null,
+
+    // -- Day 8: Cursor Chat state --------------------------------------------
+
+    /** Last known logical coordinates of the local cursor */
+    lastKnownCursor: { x: 0, y: 0 },
+
+    /** Whether the cursor chat input is currently open */
+    isChatInputOpen: false,
+
+    /** Reference to the local chat bubble DOM element */
+    activeLocalBubble: null,
+
+    /** Reference to the local chat input wrapper DOM element */
+    activeChatInput: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,42 +74,42 @@ const AppState = window.AppState = {
 // ---------------------------------------------------------------------------
 const DOM = {
     // Core containers
-    app:              document.getElementById('app'),
-    canvasContainer:  document.getElementById('canvas-container'),
-    canvas:           document.getElementById('canvas'),
-    cursorOverlay:    document.getElementById('cursor-overlay'),
+    app: document.getElementById('app'),
+    canvasContainer: document.getElementById('canvas-container'),
+    canvas: document.getElementById('canvas'),
+    cursorOverlay: document.getElementById('cursor-overlay'),
 
     // Toolbar
-    toolbar:          document.getElementById('toolbar'),
-    toolbarRoomName:  document.getElementById('toolbar-room-name'),
-    toolButtons:      document.querySelectorAll('.toolbar__tool'),
-    colorInput:       document.getElementById('tool-color'),
-    colorSwatch:      document.getElementById('tool-color-swatch'),
-    strokeWidthSelect:document.getElementById('tool-stroke-width'),
-    sidebarToggle:    document.getElementById('toolbar-sidebar-toggle'),
-    menuBtn:          document.getElementById('toolbar-menu-btn'),
-    moreBtn:          document.getElementById('toolbar-more-btn'),
-    participants:     document.getElementById('toolbar-participants'),
+    toolbar: document.getElementById('toolbar'),
+    toolbarRoomName: document.getElementById('toolbar-room-name'),
+    toolButtons: document.querySelectorAll('.toolbar__tool'),
+    colorInput: document.getElementById('tool-color'),
+    colorSwatch: document.getElementById('tool-color-swatch'),
+    strokeWidthSelect: document.getElementById('tool-stroke-width'),
+    sidebarToggle: document.getElementById('toolbar-sidebar-toggle'),
+    menuBtn: document.getElementById('toolbar-menu-btn'),
+    moreBtn: document.getElementById('toolbar-more-btn'),
+    participants: document.getElementById('toolbar-participants'),
 
     // Sidebar
-    sidebar:          document.getElementById('sidebar'),
-    sidebarCloseBtn:  document.getElementById('sidebar-close-btn'),
-    participantList:  document.getElementById('sidebar-participant-list'),
+    sidebar: document.getElementById('sidebar'),
+    sidebarCloseBtn: document.getElementById('sidebar-close-btn'),
+    participantList: document.getElementById('sidebar-participant-list'),
 
     // Status bar
-    statusBar:        document.getElementById('status-bar'),
+    statusBar: document.getElementById('status-bar'),
     statusConnection: document.getElementById('status-connection'),
-    statusRoom:       document.getElementById('status-room'),
-    statusSave:       document.getElementById('status-save'),
-    statusUsers:      document.getElementById('status-users'),
+    statusRoom: document.getElementById('status-room'),
+    statusSave: document.getElementById('status-save'),
+    statusUsers: document.getElementById('status-users'),
 
     // Modal
-    roomModal:        document.getElementById('room-modal'),
-    modalUsername:     document.getElementById('modal-username'),
-    modalRoomCode:    document.getElementById('modal-room-code'),
-    modalError:       document.getElementById('modal-error'),
-    modalJoinBtn:     document.getElementById('modal-join-btn'),
-    modalCreateBtn:   document.getElementById('modal-create-btn'),
+    roomModal: document.getElementById('room-modal'),
+    modalUsername: document.getElementById('modal-username'),
+    modalRoomCode: document.getElementById('modal-room-code'),
+    modalError: document.getElementById('modal-error'),
+    modalJoinBtn: document.getElementById('modal-join-btn'),
+    modalCreateBtn: document.getElementById('modal-create-btn'),
 };
 
 // ---------------------------------------------------------------------------
@@ -110,15 +124,15 @@ function setActiveTool(toolName) {
 
     // Update canvas cursor style based on tool
     const cursorMap = {
-        select:    'default',
-        pencil:    'crosshair',
-        text:      'text',
+        select: 'default',
+        pencil: 'crosshair',
+        text: 'text',
         rectangle: 'crosshair',
-        circle:    'crosshair',
-        line:      'crosshair',
-        arrow:     'crosshair',
-        heart:     'crosshair',
-        image:     'pointer',
+        circle: 'crosshair',
+        line: 'crosshair',
+        arrow: 'crosshair',
+        heart: 'crosshair',
+        image: 'pointer',
     };
     DOM.canvas.style.cursor = cursorMap[toolName] || 'default';
 
@@ -185,12 +199,275 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Keyboard Shortcuts (tool hotkeys)
+// Cursor Chat & Undo/Redo & Keyboard Shortcuts
 // ---------------------------------------------------------------------------
+
+/**
+ * Renders a cursor chat bubble that auto-dismisses after 4 seconds.
+ * @param {string} userId - UUID of the user
+ * @param {string} username - Name to display
+ * @param {number} logicalX - 1920x1080 coordinate
+ * @param {number} logicalY - 1920x1080 coordinate
+ * @param {string} message - Chat text
+ */
+function renderCursorChatBubble(userId, username, logicalX, logicalY, message) {
+    // Convert logical coordinates to screen pixels relative to the canvas container
+    const rect = DOM.canvasContainer.getBoundingClientRect();
+    const scaleX = rect.width / 1920;
+    const scaleY = rect.height / 1080;
+
+    const screenX = logicalX * scaleX;
+    const screenY = logicalY * scaleY;
+
+    // Create the bubble wrapper
+    const bubble = document.createElement('div');
+    bubble.className = 'cursor-chat-bubble';
+    bubble.style.left = `${screenX}px`;
+    // Position slightly above the cursor
+    bubble.style.top = `${screenY - 10}px`;
+    // Offset so the pointer tail aligns with the cursor
+    bubble.style.transform = 'translate(10px, -100%)';
+
+    // Add user's unique color based on name (matching UI avatar color logic)
+    const hue = Array.from(username).reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
+    bubble.style.backgroundColor = `hsl(${hue}, 70%, 40%)`;
+
+    // Name label
+    const nameEl = document.createElement('div');
+    nameEl.className = 'cursor-chat-bubble__name';
+    nameEl.textContent = username;
+
+    // Message body
+    const msgEl = document.createElement('div');
+    msgEl.className = 'cursor-chat-bubble__message';
+    msgEl.textContent = message;
+
+    bubble.appendChild(nameEl);
+    bubble.appendChild(msgEl);
+
+    // Attach to the specific remote cursor if available, so it follows naturally
+    let attachedToRemote = false;
+    if (userId !== AppState.userId && window.CollabCanvas?.cursorManager) {
+        const remoteEntry = window.CollabCanvas.cursorManager.cursors.get(userId);
+        if (remoteEntry && remoteEntry.element) {
+            remoteEntry.element.appendChild(bubble);
+            // Override position since parent transforms
+            bubble.style.left = '0px';
+            bubble.style.top = '-10px';
+            attachedToRemote = true;
+        }
+    }
+
+    if (!attachedToRemote) {
+        DOM.cursorOverlay.appendChild(bubble);
+        if (userId === AppState.userId) {
+            // Remove existing local bubble if present
+            if (AppState.activeLocalBubble && AppState.activeLocalBubble.parentNode) {
+                AppState.activeLocalBubble.parentNode.removeChild(AppState.activeLocalBubble);
+            }
+            AppState.activeLocalBubble = bubble;
+        }
+    }
+
+    // Auto-dismiss after 4 seconds (matches CSS animation)
+    setTimeout(() => {
+        if (bubble.parentNode) {
+            bubble.parentNode.removeChild(bubble);
+            if (bubble === AppState.activeLocalBubble) {
+                AppState.activeLocalBubble = null;
+            }
+        }
+    }, 4000);
+}
+
+/**
+ * Opens the floating cursor chat input at the last known cursor position.
+ */
+function openCursorChatInput() {
+    if (AppState.isChatInputOpen) return;
+    AppState.isChatInputOpen = true;
+
+    // Convert logical coordinates to screen pixels
+    const rect = DOM.canvasContainer.getBoundingClientRect();
+    const scaleX = rect.width / 1920;
+    const scaleY = rect.height / 1080;
+    const screenX = AppState.lastKnownCursor.x * scaleX;
+    const screenY = AppState.lastKnownCursor.y * scaleY;
+
+    // Create the input wrapper
+    const wrapper = document.createElement('div');
+    wrapper.className = 'cursor-chat-input-wrapper';
+    wrapper.style.left = `${screenX + 15}px`; // Offset slightly from the exact point
+    wrapper.style.top = `${screenY - 15}px`;
+
+    const slashBadge = document.createElement('div');
+    slashBadge.className = 'cursor-chat-input-slash';
+    slashBadge.textContent = '/';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'cursor-chat-input';
+    input.placeholder = 'Say something...';
+    input.maxLength = 200;
+
+    wrapper.appendChild(slashBadge);
+    wrapper.appendChild(input);
+    DOM.cursorOverlay.appendChild(wrapper);
+    AppState.activeChatInput = wrapper;
+
+    // Focus the input immediately
+    input.focus();
+
+    // -- Auto-dismiss on inactivity --
+    let inactivityTimeout;
+    function resetInactivityTimeout() {
+        if (inactivityTimeout) clearTimeout(inactivityTimeout);
+        inactivityTimeout = setTimeout(() => {
+            closeCursorChatInput();
+        }, 4000);
+    }
+
+    // Start the timer
+    resetInactivityTimeout();
+
+    // Handle input keys
+    input.addEventListener('keydown', (e) => {
+        // Prevent event from bubbling up to global hotkeys
+        e.stopPropagation();
+
+        // User interacted, reset the 4s auto-dismiss timer
+        resetInactivityTimeout();
+
+        if (e.key === 'Escape') {
+            closeCursorChatInput();
+        } else if (e.key === 'Enter') {
+            const message = input.value.trim();
+            if (message && network.isIdentified && AppState.roomId) {
+                // Send to server
+                network.send({
+                    type: 'cursor_chat',
+                    x: AppState.lastKnownCursor.x,
+                    y: AppState.lastKnownCursor.y,
+                    message: message
+                });
+
+                // Show optimistic local bubble immediately
+                renderCursorChatBubble(
+                    AppState.userId,
+                    AppState.username,
+                    AppState.lastKnownCursor.x,
+                    AppState.lastKnownCursor.y,
+                    message
+                );
+            }
+            closeCursorChatInput();
+        }
+    });
+
+    // Close if user clicks outside
+    const outsideClickListener = (e) => {
+        if (!wrapper.contains(e.target)) {
+            closeCursorChatInput();
+            document.removeEventListener('mousedown', outsideClickListener);
+        }
+    };
+
+    // Defer attaching the outside click listener to avoid triggering on the current event
+    setTimeout(() => {
+        document.addEventListener('mousedown', outsideClickListener);
+    }, 0);
+
+    function closeCursorChatInput() {
+        if (inactivityTimeout) clearTimeout(inactivityTimeout);
+
+        if (wrapper.parentNode) {
+            const fadeOut = wrapper.animate([
+                { opacity: 1 },
+                { opacity: 0 }
+            ], {
+                duration: 200,
+                easing: 'ease-out'
+            });
+
+            fadeOut.onfinish = () => {
+                if (wrapper.parentNode) {
+                    wrapper.parentNode.removeChild(wrapper);
+                }
+            };
+        }
+        AppState.isChatInputOpen = false;
+        AppState.activeChatInput = null;
+        // Refocus canvas or app so global hotkeys work again
+        DOM.canvas.focus();
+    }
+}
+
+// Track local cursor position for cursor chat spawning and following
+DOM.canvas.addEventListener('mousemove', (e) => {
+    // Convert to logical coordinates
+    const rect = DOM.canvas.getBoundingClientRect();
+    const scaleX = 1920 / rect.width;
+    const scaleY = 1080 / rect.height;
+    AppState.lastKnownCursor = {
+        x: Math.round((e.clientX - rect.left) * scaleX),
+        y: Math.round((e.clientY - rect.top) * scaleY)
+    };
+
+    // Update positioning for local floating elements
+    // We can use the raw client offsets relative to the canvas
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+
+    if (AppState.activeLocalBubble) {
+        AppState.activeLocalBubble.style.left = `${screenX}px`;
+        AppState.activeLocalBubble.style.top = `${screenY - 10}px`;
+    }
+    if (AppState.activeChatInput) {
+        AppState.activeChatInput.style.left = `${screenX + 15}px`;
+        AppState.activeChatInput.style.top = `${screenY - 15}px`;
+    }
+});
+
 document.addEventListener('keydown', (e) => {
-    // Don't capture when typing in an input
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    // -- Day 8: Undo/Redo Bindings --
+    if (e.ctrlKey || e.metaKey) {
+        if (e.key.toLowerCase() === 'z') {
+            if (e.shiftKey) {
+                // Ctrl+Shift+Z -> Redo
+                e.preventDefault();
+                window.UndoRedoManager?.redo();
+                return;
+            } else {
+                // Ctrl+Z -> Undo
+                e.preventDefault();
+                window.UndoRedoManager?.undo();
+                return;
+            }
+        }
+        if (e.key.toLowerCase() === 'y') {
+            // Ctrl+Y -> Redo
+            e.preventDefault();
+            window.UndoRedoManager?.redo();
+            return;
+        }
+    }
+
+    // Don't capture standard hotkeys when typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
+        return;
+    }
+
+    // Modifiers mean it's likely a browser shortcut, let it pass
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    // -- Day 8: Cursor Chat trigger --
+    if (e.key === '/') {
+        e.preventDefault();
+        openCursorChatInput();
+        return;
+    }
+
+    // -- Tool Hotkeys --
 
     const keyMap = {
         'v': 'select',
@@ -296,6 +573,11 @@ network.on('hello_ack', (data) => {
 // -- Subscribe to errors -----------------------------------------------------
 network.on('error', (data) => {
     console.warn(`[CollabBoard] Server error: [${data.code}] ${data.message}`);
+});
+
+// -- Day 8: Subscribe to Cursor Chat Broadcast -------------------------------
+network.on('cursor_chat_broadcast', (data) => {
+    renderCursorChatBubble(data.user_id, data.username, data.x, data.y, data.message);
 });
 
 // -- Subscribe to reconnect events -------------------------------------------
