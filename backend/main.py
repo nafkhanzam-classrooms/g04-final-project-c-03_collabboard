@@ -222,19 +222,32 @@ async def health_check():
     redis_status = "disconnected"
     if redis_client.redis_conn is not None:
         try:
-            await redis_client.redis_conn.ping()
+            await asyncio.wait_for(redis_client.redis_conn.ping(), timeout=1.0)
             redis_status = "connected"
         except Exception:
-            redis_status = "error"
+            redis_status = "unreachable"
 
     # Check PostgreSQL connectivity
     from backend.db import pool as db_pool
-    pg_status = "connected" if db_pool is not None else "disconnected"
+    pg_status = "disconnected"
+    if db_pool is not None:
+        try:
+            await asyncio.wait_for(db_pool.fetchval("SELECT 1"), timeout=1.0)
+            pg_status = "connected"
+        except Exception:
+            pg_status = "unreachable"
+
+    status_code = 200
+    overall_status = "ok"
+
+    if redis_status == "unreachable" or pg_status == "unreachable":
+        status_code = 503
+        overall_status = "degraded"
 
     return JSONResponse(
-        status_code=200,
+        status_code=status_code,
         content={
-            "status": "ok",
+            "status": overall_status,
             "server_id": SERVER_ID,
             "server_version": SERVER_VERSION,
             "uptime_seconds": uptime,
