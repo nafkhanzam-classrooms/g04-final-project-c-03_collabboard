@@ -62,11 +62,14 @@ const AppState = window.AppState = {
     /** Whether the cursor chat input is currently open */
     isChatInputOpen: false,
 
+    /** Reference to the local chat input wrapper DOM element */
+    activeChatInput: null,
+
     /** Reference to the local chat bubble DOM element */
     activeLocalBubble: null,
 
-    /** Reference to the local chat input wrapper DOM element */
-    activeChatInput: null,
+    /** Active remote chat bubbles (mapped by user ID) */
+    activeRemoteBubbles: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -211,71 +214,105 @@ document.addEventListener('keydown', (e) => {
  * @param {string} message - Chat text
  */
 function renderCursorChatBubble(userId, username, logicalX, logicalY, message) {
-    // Convert logical coordinates to screen pixels relative to the canvas container
-    const rect = DOM.canvasContainer.getBoundingClientRect();
-    const scaleX = rect.width / 1920;
-    const scaleY = rect.height / 1080;
-
-    const screenX = logicalX * scaleX;
-    const screenY = logicalY * scaleY;
-
-    // Create the bubble wrapper
-    const bubble = document.createElement('div');
-    bubble.className = 'cursor-chat-bubble';
-    bubble.style.left = `${screenX}px`;
-    // Position slightly above the cursor
-    bubble.style.top = `${screenY - 10}px`;
-    // Offset so the pointer tail aligns with the cursor
-    bubble.style.transform = 'translate(10px, -100%)';
-
-    // Add user's unique color based on name (matching UI avatar color logic)
-    const hue = Array.from(username).reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
-    bubble.style.backgroundColor = `hsl(${hue}, 70%, 40%)`;
-
-    // Name label
-    const nameEl = document.createElement('div');
-    nameEl.className = 'cursor-chat-bubble__name';
-    nameEl.textContent = username;
-
-    // Message body
-    const msgEl = document.createElement('div');
-    msgEl.className = 'cursor-chat-bubble__message';
-    msgEl.textContent = message;
-
-    bubble.appendChild(nameEl);
-    bubble.appendChild(msgEl);
-
-    // Attach to the specific remote cursor if available, so it follows naturally
-    let attachedToRemote = false;
-    if (userId !== AppState.userId && window.CollabCanvas?.cursorManager) {
-        const remoteEntry = window.CollabCanvas.cursorManager.cursors.get(userId);
-        if (remoteEntry && remoteEntry.element) {
-            remoteEntry.element.appendChild(bubble);
-            // Override position since parent transforms
-            bubble.style.left = '0px';
-            bubble.style.top = '-10px';
-            attachedToRemote = true;
-        }
+    if (userId === AppState.userId && !message) {
+        return;
     }
 
-    if (!attachedToRemote) {
-        DOM.cursorOverlay.appendChild(bubble);
-        if (userId === AppState.userId) {
-            // Remove existing local bubble if present
-            if (AppState.activeLocalBubble && AppState.activeLocalBubble.parentNode) {
-                AppState.activeLocalBubble.parentNode.removeChild(AppState.activeLocalBubble);
+    let bubble;
+    const isLocal = userId === AppState.userId;
+
+    if (isLocal) {
+        bubble = AppState.activeLocalBubble;
+    } else {
+        bubble = AppState.activeRemoteBubbles[userId];
+    }
+
+    if (!message) {
+        if (bubble && bubble.parentNode && !bubble._isFadingOut) {
+            // Clear the inactivity timer so it doesn't double-fire
+            if (bubble._dismissTimer) clearTimeout(bubble._dismissTimer);
+            bubble._isFadingOut = true;
+            bubble._fadeOutAnim = bubble.animate(
+                [{ opacity: 1 }, { opacity: 0 }],
+                { duration: 800, easing: 'ease-out' }
+            );
+            bubble._fadeOutAnim.onfinish = () => {
+                if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
+                if (isLocal) AppState.activeLocalBubble = null;
+                else delete AppState.activeRemoteBubbles[userId];
+            };
+        }
+        return;
+    }
+
+    if (!bubble) {
+        const rect = DOM.canvasContainer.getBoundingClientRect();
+        const scaleX = rect.width / 1920;
+        const scaleY = rect.height / 1080;
+
+        const screenX = logicalX * scaleX;
+        const screenY = logicalY * scaleY;
+
+        bubble = document.createElement('div');
+        bubble.className = 'cursor-chat-bubble';
+        bubble.style.left = `${screenX}px`;
+        bubble.style.top = `${screenY - 10}px`;
+        bubble.style.transform = 'translate(10px, -100%)';
+
+        const hue = Array.from(username).reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
+        bubble.style.backgroundColor = `hsl(${hue}, 70%, 40%)`;
+
+        const msgEl = document.createElement('div');
+        msgEl.className = 'cursor-chat-bubble__message';
+
+        bubble.appendChild(msgEl);
+
+        let attachedToRemote = false;
+        if (!isLocal && window.CursorManager) {
+            const remoteCursor = window.CursorManager.cursors.get(userId);
+            if (remoteCursor && remoteCursor.element) {
+                bubble.style.left = '0px';
+                bubble.style.top = '-10px';
+                remoteCursor.element.appendChild(bubble);
+                attachedToRemote = true;
             }
+        }
+
+        if (!attachedToRemote) {
+            DOM.cursorOverlay.appendChild(bubble);
+        }
+
+        if (isLocal) {
             AppState.activeLocalBubble = bubble;
+        } else {
+            AppState.activeRemoteBubbles[userId] = bubble;
         }
     }
 
-    // Auto-dismiss after 4 seconds (matches CSS animation)
-    setTimeout(() => {
-        if (bubble.parentNode) {
-            bubble.parentNode.removeChild(bubble);
-            if (bubble === AppState.activeLocalBubble) {
-                AppState.activeLocalBubble = null;
-            }
+    if (bubble._isFadingOut) {
+        if (bubble._fadeOutAnim) bubble._fadeOutAnim.cancel();
+        bubble._isFadingOut = false;
+        bubble.style.opacity = '1';
+    }
+
+    const msgEl = bubble.querySelector('.cursor-chat-bubble__message');
+    if (msgEl) msgEl.textContent = message;
+
+    // Reset the inactivity timer on every incoming message.
+    // Fade out only triggers after 4s of silence from the sender.
+    if (bubble._dismissTimer) clearTimeout(bubble._dismissTimer);
+    bubble._dismissTimer = setTimeout(() => {
+        if (bubble.parentNode && !bubble._isFadingOut) {
+            bubble._isFadingOut = true;
+            bubble._fadeOutAnim = bubble.animate(
+                [{ opacity: 1 }, { opacity: 0 }],
+                { duration: 800, easing: 'ease-out' }
+            );
+            bubble._fadeOutAnim.onfinish = () => {
+                if (bubble.parentNode) bubble.parentNode.removeChild(bubble);
+                if (isLocal) AppState.activeLocalBubble = null;
+                else delete AppState.activeRemoteBubbles[userId];
+            };
         }
     }, 4000);
 }
@@ -304,11 +341,11 @@ function openCursorChatInput() {
     slashBadge.className = 'cursor-chat-input-slash';
     slashBadge.textContent = '/';
 
-    const input = document.createElement('input');
-    input.type = 'text';
+    const input = document.createElement('textarea');
     input.className = 'cursor-chat-input';
     input.placeholder = 'Say something...';
-    input.maxLength = 200;
+    input.maxLength = 500;
+    input.rows = 1;
 
     wrapper.appendChild(slashBadge);
     wrapper.appendChild(input);
@@ -323,12 +360,59 @@ function openCursorChatInput() {
     function resetInactivityTimeout() {
         if (inactivityTimeout) clearTimeout(inactivityTimeout);
         inactivityTimeout = setTimeout(() => {
-            closeCursorChatInput();
+            closeCursorChatInput(true);
         }, 4000);
     }
 
     // Start the timer
     resetInactivityTimeout();
+
+    const sendCurrentText = (isFinal = false) => {
+        if (!network.isIdentified || !AppState.roomId) return;
+        const message = input.value.trim();
+        // Send to server
+        network.send({
+            type: 'cursor_chat',
+            x: AppState.lastKnownCursor.x,
+            y: AppState.lastKnownCursor.y,
+            message: message
+        });
+
+        // Show optimistic local bubble ONLY on final submit (e.g. Enter)
+        if (message) {
+            if (isFinal) {
+                renderCursorChatBubble(
+                    AppState.userId,
+                    AppState.username,
+                    AppState.lastKnownCursor.x,
+                    AppState.lastKnownCursor.y,
+                    message
+                );
+            }
+        } else {
+            // Remove local bubble if empty
+            if (AppState.activeLocalBubble && AppState.activeLocalBubble.parentNode) {
+                AppState.activeLocalBubble.parentNode.removeChild(AppState.activeLocalBubble);
+                AppState.activeLocalBubble = null;
+            }
+        }
+    };
+
+    let debounceTimer;
+
+    // Handle real-time typing
+    input.addEventListener('input', () => {
+        // Auto-resize the textarea
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 150) + 'px';
+
+        resetInactivityTimeout();
+
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            sendCurrentText(false);
+        }, 50); // 50ms throttle
+    });
 
     // Handle input keys
     input.addEventListener('keydown', (e) => {
@@ -339,35 +423,15 @@ function openCursorChatInput() {
         resetInactivityTimeout();
 
         if (e.key === 'Escape') {
-            closeCursorChatInput();
-        } else if (e.key === 'Enter') {
-            const message = input.value.trim();
-            if (message && network.isIdentified && AppState.roomId) {
-                // Send to server
-                network.send({
-                    type: 'cursor_chat',
-                    x: AppState.lastKnownCursor.x,
-                    y: AppState.lastKnownCursor.y,
-                    message: message
-                });
-
-                // Show optimistic local bubble immediately
-                renderCursorChatBubble(
-                    AppState.userId,
-                    AppState.username,
-                    AppState.lastKnownCursor.x,
-                    AppState.lastKnownCursor.y,
-                    message
-                );
-            }
-            closeCursorChatInput();
+            input.value = '';
+            closeCursorChatInput(true);
         }
     });
 
     // Close if user clicks outside
     const outsideClickListener = (e) => {
         if (!wrapper.contains(e.target)) {
-            closeCursorChatInput();
+            closeCursorChatInput(true);
             document.removeEventListener('mousedown', outsideClickListener);
         }
     };
@@ -377,7 +441,7 @@ function openCursorChatInput() {
         document.addEventListener('mousedown', outsideClickListener);
     }, 0);
 
-    function closeCursorChatInput() {
+    function closeCursorChatInput(isCancel = true) {
         if (inactivityTimeout) clearTimeout(inactivityTimeout);
 
         if (wrapper.parentNode) {
@@ -385,9 +449,19 @@ function openCursorChatInput() {
                 { opacity: 1 },
                 { opacity: 0 }
             ], {
-                duration: 200,
+                duration: 250,
                 easing: 'ease-out'
             });
+
+            if (isCancel && network.isIdentified && AppState.roomId) {
+                // Send an empty message to sync the remote bubble's fade out
+                network.send({
+                    type: 'cursor_chat',
+                    x: AppState.lastKnownCursor.x,
+                    y: AppState.lastKnownCursor.y,
+                    message: ''
+                });
+            }
 
             fadeOut.onfinish = () => {
                 if (wrapper.parentNode) {

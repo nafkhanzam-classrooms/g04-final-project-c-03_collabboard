@@ -145,3 +145,43 @@ def handle_cursor_move(
         "x": x,
         "y": y,
     }
+
+
+def handle_cursor_chat(
+    user_id: str,
+    username: str,
+    data: dict,
+) -> Optional[dict]:
+    """
+    Process an incoming ``cursor_chat`` message.
+
+    Validates coordinates and message string, and constructs the
+    ``cursor_chat_broadcast`` payload. 
+    """
+    x = data.get("x")
+    y = data.get("y")
+    message = data.get("message")
+
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+
+    if not isinstance(message, str):
+        return None
+
+    x = int(x)
+    y = int(y)
+
+    if not (0 <= x <= CANVAS_MAX_X) or not (0 <= y <= CANVAS_MAX_Y):
+        return None
+
+    # Defense in depth: cap message length (frontend limits to 200)
+    message = message.strip()[:200]
+
+    return {
+        "type": "cursor_chat_broadcast",
+        "user_id": user_id,
+        "username": username,
+        "x": x,
+        "y": y,
+        "message": message,
+    }

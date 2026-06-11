@@ -71,7 +71,7 @@ from backend.rooms import (
 )
 from backend.sync import handle_op
 from backend.pubsub import start_subscriber
-from backend.cursor import handle_cursor_move, remove_user_throttle
+from backend.cursor import handle_cursor_move, handle_cursor_chat, remove_user_throttle
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -566,9 +566,34 @@ async def websocket_endpoint(websocket: WebSocket):
                     # No ack sent — fire-and-forget (API_CONTRACT §7)
                     continue
 
-                # Day 6+ — cursor_chat, save/load, etc.
+                # Day 8 (M1/M2) — cursor chat relay
+                if msg_type == "cursor_chat":
+                    if not client.room_id:
+                        continue
+                    
+                    broadcast = handle_cursor_chat(
+                        user_id=client.user_id,
+                        username=client.username,
+                        data=data,
+                    )
+                    if broadcast is not None:
+                        # Local broadcast (exclude sender)
+                        await manager.broadcast_to_room(
+                            client.room_id,
+                            broadcast,
+                            exclude_user_id=client.user_id,
+                        )
+                        # Cross-server relay via Redis pub/sub
+                        await redis_client.publish_to_room(
+                            room_id=client.room_id,
+                            server_id=SERVER_ID,
+                            msg_type="cursor_chat_broadcast",
+                            payload=broadcast,
+                        )
+                    continue
+
+                # Day 6+ — save/load, etc.
                 if msg_type in (
-                    "cursor_chat",
                     "save_canvas", "load_canvas", "image_request",
                 ):
                     await websocket.send_text(json.dumps({
