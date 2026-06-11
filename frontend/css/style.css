@@ -418,24 +418,41 @@ ul {
     pointer-events: none;
 }
 
-/* Individual remote cursor (injected by JS later) */
+/* Individual remote cursor (managed by CursorManager in canvas.js) */
 .remote-cursor {
     position: absolute;
+    top: 0;
+    left: 0;
     pointer-events: none;
+    will-change: transform;
     transition: transform 60ms linear;
+    z-index: 1;
+    animation: cursor-appear 150ms ease-out;
+}
+
+.remote-cursor svg {
+    display: block;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
 }
 
 .remote-cursor__label {
     position: absolute;
-    top: 20px;
-    left: 14px;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
+    top: 18px;
+    left: 12px;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-text-inverse);
+    color: #fff;
     white-space: nowrap;
     user-select: none;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    line-height: 1.4;
+}
+
+@keyframes cursor-appear {
+    from { opacity: 0; transform: scale(0.7); }
+    to   { opacity: 1; transform: scale(1); }
 }
 
 
