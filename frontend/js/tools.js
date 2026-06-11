@@ -181,11 +181,17 @@ class ToolManagerClass {
 
         // 2. Network Send
         if (window.network && window.network.isIdentified) {
-            window.network.send({
+            const addOp = {
                 type: 'op',
                 op: 'add',
-                object: payload
-            });
+                object: optimisticObj
+            };
+            window.network.send(addOp);
+            
+            // Record locally for undo/redo
+            if (window.UndoRedoManager) {
+                window.UndoRedoManager.pushAction(addOp);
+            }
         } else {
             console.warn('[ToolManager] Not connected to room. Stroke drawn locally only.');
         }
