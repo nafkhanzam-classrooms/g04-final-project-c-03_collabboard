@@ -281,6 +281,7 @@ async def _handle_modify(
     try:
         result = await db.update_canvas_object(
             room_id=room_id,
+            user_id=user_id,
             obj_id=obj_id,
             changes=clean_changes,
         )
@@ -369,6 +370,7 @@ async def _handle_delete(
     try:
         result = await db.soft_delete_canvas_object(
             room_id=room_id,
+            user_id=user_id,
             obj_id=obj_id,
         )
     except Exception as exc:

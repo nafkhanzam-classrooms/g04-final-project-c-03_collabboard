@@ -166,6 +166,10 @@ class CanvasRenderer {
                     obj.seq = data.seq;
                     this.objects.delete(tempId);
                     this.objects.set(data.obj_id, obj);
+                    
+                    if (window.UndoRedoManager) {
+                        window.UndoRedoManager.updateObjectId(tempId, data.obj_id);
+                    }
                 }
             }
         } else {
@@ -185,6 +189,26 @@ class CanvasRenderer {
         this.objects.set(obj.obj_id, obj);
         if (obj.obj_id.startsWith('temp-')) {
             this.pendingAdds.push(obj.obj_id);
+        }
+    }
+
+    /**
+     * Removes an object optimistically (e.g., from an undo operation).
+     * @param {string} objId 
+     */
+    removeOptimisticObject(objId) {
+        this.objects.delete(objId);
+    }
+
+    /**
+     * Modifies an object optimistically.
+     * @param {string} objId 
+     * @param {Object} changes 
+     */
+    modifyOptimisticObject(objId, changes) {
+        const obj = this.objects.get(objId);
+        if (obj) {
+            Object.assign(obj, changes);
         }
     }
 

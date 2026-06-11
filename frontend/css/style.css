@@ -139,13 +139,16 @@
 /* ---------------------------------------------------------------------------
    1. Reset & Base
    --------------------------------------------------------------------------- */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
     margin: 0;
     padding: 0;
     box-sizing: border-box;
 }
 
-html, body {
+html,
+body {
     width: 100%;
     height: 100%;
     overflow: hidden;
@@ -167,7 +170,8 @@ button {
     color: inherit;
 }
 
-input, select {
+input,
+select {
     font-family: inherit;
     font-size: inherit;
 }
@@ -212,7 +216,7 @@ ul {
     box-shadow: var(--shadow-toolbar);
 
     transition: box-shadow var(--transition-normal),
-                background var(--transition-normal);
+        background var(--transition-normal);
 }
 
 #toolbar:hover {
@@ -255,8 +259,8 @@ ul {
     border-radius: var(--radius-md);
     color: var(--color-text-secondary);
     transition: background var(--transition-fast),
-                color var(--transition-fast),
-                transform var(--transition-fast);
+        color var(--transition-fast),
+        transform var(--transition-fast);
 }
 
 .toolbar__btn:hover {
@@ -451,8 +455,15 @@ ul {
 }
 
 @keyframes cursor-appear {
-    from { opacity: 0; transform: scale(0.7); }
-    to   { opacity: 1; transform: scale(1); }
+    from {
+        opacity: 0;
+        transform: scale(0.7);
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
 }
 
 
@@ -613,8 +624,15 @@ ul {
 }
 
 @keyframes pulse-dot {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
 }
 
 .status-bar__room {
@@ -647,7 +665,7 @@ ul {
     opacity: 0;
     visibility: hidden;
     transition: opacity var(--transition-smooth),
-                visibility var(--transition-smooth);
+        visibility var(--transition-smooth);
 }
 
 .modal[aria-hidden="false"] {
@@ -726,7 +744,7 @@ ul {
     font-size: 14px;
     outline: none;
     transition: border-color var(--transition-fast),
-                box-shadow var(--transition-fast);
+        box-shadow var(--transition-fast);
 }
 
 .modal__input:focus {
@@ -759,8 +777,8 @@ ul {
     font-weight: 600;
     cursor: pointer;
     transition: background var(--transition-fast),
-                transform var(--transition-fast),
-                box-shadow var(--transition-fast);
+        transform var(--transition-fast),
+        box-shadow var(--transition-fast);
 }
 
 .modal__btn:active {
@@ -803,28 +821,108 @@ ul {
     border-width: 0;
 }
 
-/* Cursor chat bubble (rendered by JS in Day 8) */
+/* Cursor chat bubble (Day 8 — speech bubble overlay, auto-dismiss after 4s) */
 .cursor-chat-bubble {
     position: absolute;
     padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-md) 4px;
     font-size: 12px;
     font-weight: 500;
     color: var(--color-text-inverse);
-    white-space: nowrap;
+    white-space: normal;
+    width: 200px;
     pointer-events: none;
-    animation: bubble-appear 200ms ease-out, bubble-fade 4s ease-in forwards;
-    animation-delay: 0s, 0s;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: bubble-appear 200ms ease-out;
+}
+
+.cursor-chat-bubble__message {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    word-break: break-word;
+    white-space: pre-wrap;
 }
 
 @keyframes bubble-appear {
-    from { opacity: 0; transform: translateY(4px) scale(0.95); }
-    to   { opacity: 1; transform: translateY(0) scale(1); }
+    from {
+        opacity: 0;
+        transform: translateY(4px) scale(0.95);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
 }
 
 @keyframes bubble-fade {
-    0%, 80% { opacity: 1; }
-    100%    { opacity: 0; }
+
+    0%,
+    80% {
+        opacity: 1;
+    }
+
+    100% {
+        opacity: 0;
+    }
+}
+
+/* Cursor chat input (Day 8 — floating text entry triggered by / key) */
+.cursor-chat-input-wrapper {
+    position: absolute;
+    z-index: 15;
+    /* above cursor-overlay (10), below toolbar (100) */
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    animation: bubble-appear 150ms ease-out;
+}
+
+.cursor-chat-input-slash {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    background: var(--color-accent);
+    color: var(--color-text-inverse);
+    font-size: 13px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+    box-shadow: var(--shadow-sm);
+}
+
+.cursor-chat-input {
+    width: 220px;
+    min-height: 32px;
+    height: auto;
+    padding: 6px var(--space-md);
+    border: 2px solid var(--color-accent);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+    color: var(--color-text-primary);
+    font-size: 13px;
+    font-family: var(--font-primary);
+    outline: none;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 0 0 1px var(--color-accent-light);
+    transition: box-shadow var(--transition-fast);
+    resize: none;
+    overflow: hidden;
+}
+
+.cursor-chat-input:focus {
+    box-shadow: 0 4px 24px rgba(91, 95, 199, 0.25), 0 0 0 3px var(--color-accent-light);
+}
+
+.cursor-chat-input::placeholder {
+    color: var(--color-text-tertiary);
+    font-size: 12px;
 }
 
 /* Toast notification (future use) */
@@ -842,7 +940,7 @@ ul {
     color: var(--color-text-primary);
     opacity: 0;
     transition: opacity var(--transition-normal),
-                transform var(--transition-normal);
+        transform var(--transition-normal);
     z-index: var(--z-modal);
 }
 
