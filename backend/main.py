@@ -2,41 +2,25 @@
 # CollabBoard — FastAPI Application Entry Point
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 6 — Disconnect cleanup hardening
+# Sprint: Day 7 — WebSocket disconnect edge-case fixes
 #
 # This module creates the FastAPI application, registers the health-check HTTP
 # endpoint, implements the WebSocket route with hello/hello_ack handshake,
 # and configures application lifespan events (startup / shutdown).
 #
-# Day 2 changes:
-#   - Replaced WebSocket stub with real hello/hello_ack handshake
-#   - Integrated ConnectionManager for client tracking
-#   - Implemented session state machine (Connected → Identified)
-#   - Added ping/pong app-level heartbeat support
-#   - Wired active_connections count into /health endpoint
-#
-# Day 3 changes:
-#   - Integrated async Redis client (init/close in lifespan)
-#   - Redis session creation on successful hello handshake
-#   - Redis session deletion on WebSocket disconnect
-#   - Updated /health endpoint with Redis connectivity status
-#
-# Day 4 changes:
-#   - Routed create_room, join_room, leave_room to rooms.py handlers
-#   - Disconnect cleanup now handles users who were in a room
-#   - /health endpoint shows active room count
-#
-# Day 5 changes:
-#   - Integrated Redis pub/sub subscriber task (backend/pubsub.py)
-#   - Cross-server relay via PSUBSCRIBE room:*
-#   - Anti-echo: _server_id == MY_SERVER_ID filtering
+# Day 7 changes:
+#   - Added asyncio.CancelledError handling for server-shutdown-during-
+#     active-connection scenarios (CancelledError is BaseException in 3.9+)
+#   - Added receive timeouts: 10s for hello handshake, 120s for message loop
+#     as defense-in-depth dead-connection detection
+#   - Improved disconnect logging: distinguishes graceful, abrupt, timeout,
+#     and server-shutdown disconnect types
 #
 # Day 6 changes:
 #   - Hardened disconnect cleanup: each tier (PG, Redis, memory) is
 #     independently try/except'd so a failure in one doesn't block others
 #   - Added structured logging for graceful vs abrupt disconnect
-#   - Defense-in-depth: delete_session wrapped in try/except even though
-#     the function itself handles errors internally
+#   - Defense-in-depth: delete_session wrapped in try/except
 #   - Subscriber starts on lifespan startup, cancelled on shutdown
 #   - Uses dedicated Redis connection with PSUBSCRIBE room:*
 #   - Cross-server messages relayed to local clients via ConnectionManager
@@ -45,13 +29,14 @@
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §1, §2
 #   - API_CONTRACT.md §1 (hello), §3 (ping/pong), §4-6 (rooms), §GET /health
-#   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §2-3 (rooms), §8 (heartbeat)
+#   - WEBSOCKET_PROTOCOL_EXTENSION.md §1 (lifecycle), §2-3 (rooms), §8-9
 #   - DISTRIBUTED_SYSTEM_DESIGN.md §7 (Session Lifecycle), §8.1 (Redis Schema)
 #   - DOCKER_DEPLOYMENT.md §8 (backend responsibilities)
 # =============================================================================
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -136,7 +121,7 @@ async def lifespan(app: FastAPI):
         - Close Redis connection (M1, Day 3) [DONE]
         - TODO: Cancel remaining background tasks
     """
-    import asyncio
+    # asyncio is imported at module level (Day 7)
 
     pubsub_task: asyncio.Task | None = None
 
@@ -338,9 +323,18 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             return
 
-        # Wait for the hello message
+        # Wait for the hello message (10s timeout — Day 7)
         try:
-            raw = await websocket.receive_text()
+            raw = await asyncio.wait_for(
+                websocket.receive_text(), timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            await _send_error_and_close(
+                websocket,
+                code="TIMEOUT",
+                message="Hello handshake timed out (10s)",
+            )
+            return
         except WebSocketDisconnect:
             return  # Client disconnected before sending hello
 
@@ -421,7 +415,20 @@ async def websocket_endpoint(websocket: WebSocket):
         # ------------------------------------------------------------------
 
         while True:
-            raw = await websocket.receive_text()
+            # 120s receive timeout — defense-in-depth for silent dead
+            # connections that bypass WebSocket-level ping/pong (Day 7).
+            # Uvicorn's default ws-ping-interval (20s) + ws-ping-timeout
+            # (20s) handles most cases; this is a fallback safety net.
+            try:
+                raw = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[{SERVER_ID}] Receive timeout (120s) for "
+                    f"user {user_id} — closing connection"
+                )
+                break
 
             # Parse JSON — malformed messages close the connection
             try:
@@ -582,6 +589,15 @@ async def websocket_endpoint(websocket: WebSocket):
         # Graceful disconnect: client sent a close frame or browser tab
         # was closed normally.  Falls through to the finally block.
         pass
+    except asyncio.CancelledError:
+        # Server shutdown while this connection was active (Day 7, A4).
+        # CancelledError is a BaseException in Python 3.9+, so the
+        # generic 'except Exception' below would NOT catch it.  We must
+        # handle it explicitly to ensure the finally cleanup runs.
+        print(
+            f"[{SERVER_ID}] WebSocket cancelled (server shutdown) "
+            f"for user {user_id}"
+        )
     except Exception as exc:
         # Abrupt disconnect: network drop, kill -9, or unexpected error.
         # Log the exception for debugging, then fall through to cleanup.

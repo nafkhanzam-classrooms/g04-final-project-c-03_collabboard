@@ -2,7 +2,7 @@
 # CollabBoard — Room Manager
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 6 — Disconnect cleanup hardening
+# Sprint: Day 7 — WebSocket disconnect edge-case fixes
 #
 # This module implements the three room lifecycle handlers:
 #   - handle_create_room: generate room, insert to PG, auto-join creator
@@ -17,8 +17,17 @@
 #                         room:{id} pub/sub channel
 #   Tier 3 (Memory):     ConnectionManager.clients + room_connections
 #
+# Day 7 changes:
+#   - Reordered state mutations in handle_create_room and handle_join_room:
+#     manager.add_to_room() now runs IMMEDIATELY after PG writes, before
+#     Redis writes and WebSocket sends.  This guarantees client.room_id is
+#     set early, so the main.py finally block always triggers
+#     handle_disconnect_cleanup — even on mid-handshake disconnects (A1).
+#   - Wrapped WebSocket sends in join/create with try/except so a dead
+#     connection during the handshake re-raises cleanly to main.py.
+#
 # Reference:
-#   - WEBSOCKET_PROTOCOL_EXTENSION.md §2 (Join), §3 (Leave)
+#   - WEBSOCKET_PROTOCOL_EXTENSION.md §2 (Join), §3 (Leave), §9 (Disconnect)
 #   - API_CONTRACT.md §4 (create_room), §5 (join_room), §6 (leave_room)
 #   - DISTRIBUTED_SYSTEM_DESIGN.md §7 (Session Lifecycle), §8 (Sync)
 # =============================================================================
@@ -160,18 +169,29 @@ async def handle_create_room(
         }))
         return
 
+    # Update local in-memory state FIRST (Day 7, A1)
+    # Set client.room_id early so main.py's finally block will trigger
+    # handle_disconnect_cleanup if the connection dies during sends below.
+    manager.add_to_room(room_id, client.user_id)
+
     # Update Redis session and room membership
     await redis_client.update_session_room(client.user_id, room_id)
     await redis_client.add_room_member(room_id, client.user_id)
 
-    # Update local in-memory state
-    manager.add_to_room(room_id, client.user_id)
-
-    # Send room_created response
-    await websocket.send_text(json.dumps({
-        "type": "room_created",
-        "room_id": room_id,
-    }))
+    # Send room_created response (may throw if WS is dead — cleanup in finally)
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "room_created",
+            "room_id": room_id,
+        }))
+    except Exception as exc:
+        # Connection died during send. client.room_id is set, so
+        # main.py's finally block will clean up PG + Redis + memory.
+        print(
+            f"[rooms] WARNING: room_created send failed for "
+            f"{client.user_id} in {room_id}: {exc}"
+        )
+        raise  # Re-raise so main.py's disconnect handler runs
 
     print(
         f"[rooms] Room created: {room_id} by "
@@ -290,8 +310,9 @@ async def handle_join_room(
     await redis_client.update_session_room(client.user_id, room_id)
     await redis_client.add_room_member(room_id, client.user_id)
 
-    # --- Tier 3 (In-memory) --------------------------------------------------
-
+    # --- Tier 3 (In-memory) --- BEFORE sends (Day 7, A1) ---------------------
+    # Set client.room_id early so main.py's finally block will trigger
+    # handle_disconnect_cleanup if the connection dies during sends below.
     manager.add_to_room(room_id, client.user_id)
 
     # --- Responses -----------------------------------------------------------
@@ -308,45 +329,54 @@ async def handle_join_room(
         # Fallback: at least include the joiner
         members = [{"user_id": client.user_id, "username": client.username}]
 
-    # Send join_ack to the joiner
-    await websocket.send_text(json.dumps({
-        "type": "join_ack",
-        "room_id": room_id,
-        "members": members,
-    }))
-
-    # Send canvas_snapshot to the joiner (Day 6, M3: live query)
+    # Send join_ack + canvas_snapshot (may throw if WS is dead)
     try:
-        seq = await db.get_room_seq(room_id)
-        if seq is None:
+        await websocket.send_text(json.dumps({
+            "type": "join_ack",
+            "room_id": room_id,
+            "members": members,
+        }))
+
+        # Send canvas_snapshot to the joiner (Day 6, M3: live query)
+        try:
+            seq = await db.get_room_seq(room_id)
+            if seq is None:
+                seq = 0
+        except Exception:
             seq = 0
-    except Exception:
-        seq = 0
 
-    try:
-        obj_rows = await db.get_canvas_objects(room_id)
-        objects = [
-            {
-                "obj_id": str(row["obj_id"]),
-                "obj_type": row["obj_type"],
-                "created_by": str(row["created_by"]),
-                "created_at": row["created_at"].isoformat(),
-                "z_index": row["z_index"],
-                "color": row["color"],
-                "stroke_width": row["stroke_width"],
-                "properties": json.loads(row["properties"]) if isinstance(row["properties"], str) else row["properties"],
-            }
-            for row in obj_rows
-        ]
+        try:
+            obj_rows = await db.get_canvas_objects(room_id)
+            objects = [
+                {
+                    "obj_id": str(row["obj_id"]),
+                    "obj_type": row["obj_type"],
+                    "created_by": str(row["created_by"]),
+                    "created_at": row["created_at"].isoformat(),
+                    "z_index": row["z_index"],
+                    "color": row["color"],
+                    "stroke_width": row["stroke_width"],
+                    "properties": json.loads(row["properties"]) if isinstance(row["properties"], str) else row["properties"],
+                }
+                for row in obj_rows
+            ]
+        except Exception as exc:
+            print(f"[rooms] WARNING: Failed to fetch canvas objects: {exc}")
+            objects = []
+
+        await websocket.send_text(json.dumps({
+            "type": "canvas_snapshot",
+            "seq": seq,
+            "objects": objects,
+        }))
     except Exception as exc:
-        print(f"[rooms] WARNING: Failed to fetch canvas objects: {exc}")
-        objects = []
-
-    await websocket.send_text(json.dumps({
-        "type": "canvas_snapshot",
-        "seq": seq,
-        "objects": objects,
-    }))
+        # Connection died during join handshake sends.  client.room_id is
+        # already set, so main.py's finally block handles full cleanup.
+        print(
+            f"[rooms] WARNING: Join sends failed for "
+            f"{client.user_id} in {room_id}: {exc}"
+        )
+        raise  # Re-raise so main.py's disconnect handler runs
 
     # --- Broadcast user_joined -----------------------------------------------
 

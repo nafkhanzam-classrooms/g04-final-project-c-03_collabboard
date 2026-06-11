@@ -2,7 +2,7 @@
 # CollabBoard — Connection Manager
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 6 — Disconnect cleanup hardening
+# Sprint: Day 7 — WebSocket disconnect edge-case fixes
 #
 # This module manages active WebSocket connections, tracks client session
 # state, and provides broadcast utilities for room-level messaging.
