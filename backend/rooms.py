@@ -2,7 +2,7 @@
 # CollabBoard — Room Manager
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 4 — Room create/join/leave flows
+# Sprint: Day 6 — Disconnect cleanup hardening
 #
 # This module implements the three room lifecycle handlers:
 #   - handle_create_room: generate room, insert to PG, auto-join creator
@@ -315,8 +315,7 @@ async def handle_join_room(
         "members": members,
     }))
 
-    # Send canvas_snapshot to the joiner
-    # Day 4: empty snapshot. Day 7+: M3 wires load_canvas query.
+    # Send canvas_snapshot to the joiner (Day 6, M3: live query)
     try:
         seq = await db.get_room_seq(room_id)
         if seq is None:
@@ -324,10 +323,29 @@ async def handle_join_room(
     except Exception:
         seq = 0
 
+    try:
+        obj_rows = await db.get_canvas_objects(room_id)
+        objects = [
+            {
+                "obj_id": str(row["obj_id"]),
+                "obj_type": row["obj_type"],
+                "created_by": str(row["created_by"]),
+                "created_at": row["created_at"].isoformat(),
+                "z_index": row["z_index"],
+                "color": row["color"],
+                "stroke_width": row["stroke_width"],
+                "properties": json.loads(row["properties"]) if isinstance(row["properties"], str) else row["properties"],
+            }
+            for row in obj_rows
+        ]
+    except Exception as exc:
+        print(f"[rooms] WARNING: Failed to fetch canvas objects: {exc}")
+        objects = []
+
     await websocket.send_text(json.dumps({
         "type": "canvas_snapshot",
         "seq": seq,
-        "objects": [],
+        "objects": objects,
     }))
 
     # --- Broadcast user_joined -----------------------------------------------
@@ -459,6 +477,12 @@ async def handle_disconnect_cleanup(
     same cleanup as ``leave_room`` (minus sending ``leave_ack`` since
     the WebSocket is already closed).
 
+    Day 6 hardening:
+        Each cleanup tier is wrapped in its own try/except so a failure
+        in one tier (e.g. Redis unreachable) does not block the remaining
+        tiers from completing.  This follows the best-effort resilience
+        principle agreed upon in the Day 6 sprint assumptions.
+
     Flow per WEBSOCKET_PROTOCOL_EXTENSION.md §9.2:
         1. If user is InRoom: remove from PG, Redis, local state
         2. Broadcast ``user_left`` to remaining room members
@@ -475,35 +499,74 @@ async def handle_disconnect_cleanup(
     room_id = client.room_id
 
     # --- Tier 1 (PostgreSQL) -------------------------------------------------
+    # Remove the user from the room_members table.
+    # If PG is down, we log and continue — the Redis and memory tiers must
+    # still be cleaned up to prevent ghost presence.
     try:
         await db.remove_room_member(client.user_id, room_id)
     except Exception as exc:
-        print(f"[rooms] WARNING: Disconnect cleanup PG remove failed: {exc}")
+        print(
+            f"[rooms] WARNING: Disconnect cleanup PG remove failed "
+            f"for {client.user_id} in room {room_id}: {exc}"
+        )
 
     # --- Tier 2 (Redis) ------------------------------------------------------
-    await redis_client.remove_room_member(room_id, client.user_id)
-    # Session will be fully deleted by main.py's delete_session call
+    # Remove user from the room:{room_id}:members SET.
+    # If this fails, the session TTL (300s) will eventually expire the
+    # stale entry.  We do NOT delete the SET key when it becomes empty
+    # (confirmed assumption: leave empty sets in Redis).
+    try:
+        await redis_client.remove_room_member(room_id, client.user_id)
+    except Exception as exc:
+        print(
+            f"[rooms] WARNING: Disconnect cleanup Redis SREM failed "
+            f"for {client.user_id} in room {room_id}: {exc}"
+        )
+    # Session hash (session:{user_id}) is fully deleted by main.py's
+    # delete_session call — no action needed here.
 
     # --- Tier 3 (In-memory) --------------------------------------------------
-    manager.remove_from_room(room_id, client.user_id)
+    # Remove from local ConnectionManager room index.
+    try:
+        manager.remove_from_room(room_id, client.user_id)
+    except Exception as exc:
+        print(
+            f"[rooms] WARNING: Disconnect cleanup memory remove failed "
+            f"for {client.user_id} in room {room_id}: {exc}"
+        )
 
     # --- Broadcast user_left -------------------------------------------------
+    # Notify remaining members (both local and cross-server) that this user
+    # has left.  Each broadcast is independent: if the local broadcast
+    # fails, the Redis pub/sub broadcast should still be attempted.
     user_left_msg = {
         "type": "user_left",
         "user_id": client.user_id,
         "username": client.username,
     }
 
-    # Local broadcast
-    await manager.broadcast_to_room(room_id, user_left_msg)
+    # Local broadcast (to other local clients still in the room)
+    try:
+        await manager.broadcast_to_room(room_id, user_left_msg)
+    except Exception as exc:
+        print(
+            f"[rooms] WARNING: Disconnect cleanup local broadcast failed "
+            f"for room {room_id}: {exc}"
+        )
 
     # Cross-server broadcast via Redis pub/sub
-    await redis_client.publish_to_room(
-        room_id=room_id,
-        server_id=server_id,
-        msg_type="user_left",
-        payload=user_left_msg,
-    )
+    try:
+        await redis_client.publish_to_room(
+            room_id=room_id,
+            server_id=server_id,
+            msg_type="user_left",
+            payload=user_left_msg,
+        )
+    except Exception as exc:
+        print(
+            f"[rooms] WARNING: Disconnect cleanup Redis pub/sub broadcast "
+            f"failed for room {room_id}: {exc}"
+        )
 
     print(
         f"[rooms] Disconnect cleanup: {client.username} ({client.user_id}) "

@@ -2,7 +2,7 @@
 # CollabBoard — Connection Manager
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 3 — In-memory connection registry + room index
+# Sprint: Day 6 — Disconnect cleanup hardening
 #
 # This module manages active WebSocket connections, tracks client session
 # state, and provides broadcast utilities for room-level messaging.
@@ -18,6 +18,12 @@
 #   - Added room_connections reverse index (dict[room_id, set[user_id]])
 #   - Helper methods: add_to_room(), remove_from_room(), get_room_connections()
 #   - These enable fast local broadcast without scanning all clients
+#
+# Day 6 notes:
+#   - disconnect() and remove_from_room() are verified idempotent — safe
+#     to call even if the user was already removed (e.g. during error recovery)
+#   - remove_from_room() auto-cleans the room_connections entry when the
+#     last local member leaves
 #
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §B2

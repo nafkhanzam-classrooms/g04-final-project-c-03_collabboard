@@ -2,7 +2,7 @@
 # CollabBoard — FastAPI Application Entry Point
 # =============================================================================
 # Owner : M1 (Server & DevOps)
-# Sprint: Day 4 — Room join/leave flows
+# Sprint: Day 6 — Disconnect cleanup hardening
 #
 # This module creates the FastAPI application, registers the health-check HTTP
 # endpoint, implements the WebSocket route with hello/hello_ack handshake,
@@ -28,6 +28,15 @@
 #
 # Day 5 changes:
 #   - Integrated Redis pub/sub subscriber task (backend/pubsub.py)
+#   - Cross-server relay via PSUBSCRIBE room:*
+#   - Anti-echo: _server_id == MY_SERVER_ID filtering
+#
+# Day 6 changes:
+#   - Hardened disconnect cleanup: each tier (PG, Redis, memory) is
+#     independently try/except'd so a failure in one doesn't block others
+#   - Added structured logging for graceful vs abrupt disconnect
+#   - Defense-in-depth: delete_session wrapped in try/except even though
+#     the function itself handles errors internally
 #   - Subscriber starts on lifespan startup, cancelled on shutdown
 #   - Uses dedicated Redis connection with PSUBSCRIBE room:*
 #   - Cross-server messages relayed to local clients via ConnectionManager
@@ -77,6 +86,7 @@ from backend.rooms import (
 )
 from backend.sync import handle_op
 from backend.pubsub import start_subscriber
+from backend.cursor import handle_cursor_move, remove_user_throttle
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -522,15 +532,42 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
-                # Day 5+ — cursor relay, save/load, etc.
+                # Day 6 (M3) — cursor relay with 50ms throttle
+                if msg_type == "cursor_move":
+                    if not client.room_id:
+                        continue
+
+                    broadcast = handle_cursor_move(
+                        user_id=client.user_id,
+                        username=client.username,
+                        data=data,
+                    )
+                    if broadcast is not None:
+                        # Local broadcast (exclude sender)
+                        await manager.broadcast_to_room(
+                            client.room_id,
+                            broadcast,
+                            exclude_user_id=client.user_id,
+                        )
+                        # Cross-server relay via Redis pub/sub
+                        await redis_client.publish_to_room(
+                            room_id=client.room_id,
+                            server_id=SERVER_ID,
+                            msg_type="cursor_update",
+                            payload=broadcast,
+                        )
+                    # No ack sent — fire-and-forget (API_CONTRACT §7)
+                    continue
+
+                # Day 6+ — cursor_chat, save/load, etc.
                 if msg_type in (
-                    "cursor_move", "cursor_chat",
+                    "cursor_chat",
                     "save_canvas", "load_canvas", "image_request",
                 ):
                     await websocket.send_text(json.dumps({
                         "type": "error",
                         "code": "NOT_IMPLEMENTED",
-                        "message": f"'{msg_type}' will be implemented in Day 5+.",
+                        "message": f"'{msg_type}' will be implemented in a future sprint.",
                     }))
                     continue
 
@@ -542,19 +579,32 @@ async def websocket_endpoint(websocket: WebSocket):
             }))
 
     except WebSocketDisconnect:
+        # Graceful disconnect: client sent a close frame or browser tab
+        # was closed normally.  Falls through to the finally block.
         pass
     except Exception as exc:
-        # Catch-all for unexpected errors; log and clean up
-        print(f"[{SERVER_ID}] WebSocket error for user {user_id}: {exc}")
+        # Abrupt disconnect: network drop, kill -9, or unexpected error.
+        # Log the exception for debugging, then fall through to cleanup.
+        print(
+            f"[{SERVER_ID}] WebSocket error (abrupt) for "
+            f"user {user_id}: {type(exc).__name__}: {exc}"
+        )
     finally:
         # ==================================================================
-        # PHASE 3: Cleanup
+        # PHASE 3: Cleanup  (Day 6 — hardened)
         # ==================================================================
+        # Each cleanup tier is independently try/except'd so a failure in
+        # one tier (e.g. Redis is down) does not prevent the remaining
+        # tiers from cleaning up.  This follows the confirmed Assumption 7:
+        # "cleanup should be best-effort across all three tiers."
+        # ------------------------------------------------------------------
         if user_id is not None:
             # Get client state BEFORE removing from manager (need room_id)
             client_state = manager.get_client(user_id)
 
-            # Clean up room state if user was in a room (Day 4)
+            # ----- Tier 1+2+3: Room cleanup (PG + Redis + memory) --------
+            # If the user was in a room, remove from all three tiers and
+            # broadcast user_left to remaining members (local + pub/sub).
             if client_state is not None and client_state.room_id is not None:
                 try:
                     await handle_disconnect_cleanup(
@@ -566,6 +616,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         f"failed for {user_id}: {exc}"
                     )
 
+            # ----- Tier 3: Remove from in-memory connection map -----------
+            # This MUST happen after handle_disconnect_cleanup because the
+            # cleanup function needs the client's WebSocket reference for
+            # the broadcast_to_room exclusion logic.
             removed = manager.disconnect(user_id)
             if removed:
                 print(
@@ -574,8 +628,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"[{manager.active_count} active]"
                 )
 
-            # Clean up Redis session state (Day 3, M1)
-            await delete_session(user_id)
+            # ----- Tier 2: Delete Redis session hash ----------------------
+            # Defense-in-depth: delete_session() has its own internal
+            # try/except, but we wrap again so a truly unexpected error
+            # (e.g. event loop issue) never propagates out of cleanup.
+            try:
+                await delete_session(user_id)
+            except Exception as exc:
+                print(
+                    f"[{SERVER_ID}] WARNING: Failed to delete Redis "
+                    f"session for {user_id}: {exc}"
+                )
+
+            # ----- Cursor throttle cleanup (Day 6, M3) ----------------
+            # Remove per-user timestamp from the cursor throttle tracker
+            # to prevent memory leaks in the _last_cursor_ts dict.
+            remove_user_throttle(user_id)
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,13 @@ class CanvasRenderer {
          */
         this.pendingAdds = [];
 
+        /**
+         * Tombstones: Set of deleted object IDs to handle network race conditions
+         * (e.g. if a delete arrives before the add broadcast).
+         * @type {Set<string>}
+         */
+        this.tombstones = new Set();
+
         // Bind the render loop to this instance
         this.renderLoop = this.renderLoop.bind(this);
     }
@@ -58,15 +65,35 @@ class CanvasRenderer {
     }
 
     /**
-     * Replaces the local state with a full snapshot from the server.
+     * Handles the initial snapshot from the server.
+     * Merges the state by preserving any un-acked local 'temp-' strokes 
+     * to prevent data loss on quick reconnects.
      * @param {Object} data - The canvas_snapshot payload
      */
     handleSnapshot(data) {
         console.log(`[CollabCanvas] Received snapshot with ${data.objects.length} objects.`);
+        
+        // Preserve local pending temp objects
+        const preservedTemps = new Map();
+        for (const [id, obj] of this.objects.entries()) {
+            if (id.startsWith('temp-')) {
+                preservedTemps.set(id, obj);
+            }
+        }
+
+        // Wipe authoritative state
         this.objects.clear();
-        this.pendingAdds = [];
+        
+        // Restore local pending temp objects
+        for (const [id, obj] of preservedTemps.entries()) {
+            this.objects.set(id, obj);
+        }
+
+        // Load snapshot objects (ignoring any that are tombstoned)
         for (const obj of data.objects) {
-            this.objects.set(obj.obj_id, obj);
+            if (!this.tombstones.has(obj.obj_id)) {
+                this.objects.set(obj.obj_id, obj);
+            }
         }
     }
 
@@ -77,11 +104,15 @@ class CanvasRenderer {
     handleOpBroadcast(data) {
         if (data.op === 'add') {
             const obj = data.object;
+            // Prevent adding an object if a delete already arrived for it
+            if (this.tombstones.has(obj.obj_id)) return;
+
             if (data.seq !== undefined) obj.seq = data.seq;
             this.objects.set(obj.obj_id, obj);
         } else if (data.op === 'modify') {
             const existing = this.objects.get(data.obj_id);
             if (existing) {
+                // Instantly snap to new coordinates/styles (no tweening)
                 const changes = data.changes || {};
                 if (changes.color) existing.color = changes.color;
                 if (changes.stroke_width !== undefined) existing.stroke_width = changes.stroke_width;
@@ -92,11 +123,11 @@ class CanvasRenderer {
                 if (data.seq !== undefined) existing.seq = data.seq;
             }
         } else if (data.op === 'delete') {
-            const existing = this.objects.get(data.obj_id);
-            if (existing) {
-                existing.is_deleted = true;
-                if (data.seq !== undefined) existing.seq = data.seq;
-            }
+            // Track the deletion to handle out-of-order packets
+            this.tombstones.add(data.obj_id);
+            
+            // Remove the object entirely from local state
+            this.objects.delete(data.obj_id);
         }
     }
 

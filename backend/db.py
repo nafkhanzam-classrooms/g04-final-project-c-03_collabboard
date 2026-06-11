@@ -2,7 +2,7 @@
 # CollabBoard — Database Layer
 # =============================================================================
 # Owner : M3 (Data/Sync)
-# Sprint: Day 1–3 — Pool Setup + CRUD + Room Membership
+# Sprint: Day 1–6 — Pool Setup + CRUD + Room Membership + Canvas Snapshot
 #
 # This module manages the asyncpg connection pool lifecycle and exposes
 # CRUD operations for all database tables.
@@ -38,6 +38,9 @@ Day 4 (M3):
 Day 5 (M3):
     - update_canvas_object  — atomic seq + JSONB merge in one transaction
     - soft_delete_canvas_object — atomic seq + soft-delete in one transaction
+
+Day 6 (M3):
+    - get_canvas_objects — fetch all active (non-deleted) objects for snapshot
 """
 
 from __future__ import annotations
@@ -821,3 +824,59 @@ async def soft_delete_canvas_object(
 
     return (seq, str(obj_row["obj_id"]))
 
+
+# =========================================================================
+# CRUD — canvas snapshot query (Day 6, M3)
+# =========================================================================
+
+async def get_canvas_objects(room_id: str) -> List[asyncpg.Record]:
+    """
+    Fetch all active (non-deleted) canvas objects for a room.
+
+    Used by M1's ``handle_join_room`` to populate the ``objects`` array
+    in the ``canvas_snapshot`` message sent to newly joining clients.
+    Also used by the ``load_canvas`` handler (Day 7).
+
+    Query details:
+        - Filters: ``room_id = $1 AND is_deleted = FALSE``
+        - Sort: ``ORDER BY z_index ASC, created_at ASC``
+          (visual layering first, chronological tie-breaking second)
+        - Index: Hits ``idx_co_room_active`` partial B-tree index
+          (DATABASE_SCHEMA.md §3.4)
+        - No pagination: returns the full set in a single batch.
+          Expected <5ms for 100 objects (DATABASE_SCHEMA.md §6).
+
+    The caller is responsible for serializing the returned records
+    into the ``canvas_snapshot`` payload shape (converting UUIDs to
+    strings and datetimes to ISO 8601).
+
+    Args:
+        room_id: 6-character room code.
+
+    Returns:
+        List of ``asyncpg.Record``, each with columns:
+        ``obj_id`` (UUID), ``obj_type`` (str), ``created_by`` (UUID),
+        ``created_at`` (datetime), ``z_index`` (int), ``color`` (str),
+        ``stroke_width`` (int), ``properties`` (dict/JSON).
+
+        Returns an empty list if the room has no active objects
+        or the room does not exist.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT obj_id, obj_type, created_by, created_at,
+                   z_index, color, stroke_width, properties
+            FROM   canvas_objects
+            WHERE  room_id = $1 AND is_deleted = FALSE
+            ORDER  BY z_index ASC, created_at ASC
+            """,
+            room_id,
+        )
+    return rows
