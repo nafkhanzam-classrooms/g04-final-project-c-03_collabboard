@@ -62,6 +62,7 @@ from backend.redis_client import (
     close_redis,
     create_session,
     delete_session,
+    refresh_session_ttl,
 )
 from backend.rooms import (
     handle_create_room,
@@ -466,6 +467,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # -- ping / pong (app-level heartbeat) ----------------------------
             if msg_type == "ping":
+                # Refresh Redis session TTL (Day 9, ISSUE-01)
+                if client.user_id:
+                    await refresh_session_ttl(client.user_id)
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
 
