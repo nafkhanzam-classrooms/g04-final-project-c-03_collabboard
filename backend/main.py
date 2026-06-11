@@ -62,7 +62,6 @@ from backend.redis_client import (
     close_redis,
     create_session,
     delete_session,
-    refresh_session_ttl,
 )
 from backend.rooms import (
     handle_create_room,
@@ -72,7 +71,6 @@ from backend.rooms import (
 )
 from backend.sync import handle_op
 from backend.pubsub import start_subscriber
-from backend.tasks import start_autosave_loop
 from backend.cursor import handle_cursor_move, remove_user_throttle
 
 # ---------------------------------------------------------------------------
@@ -114,19 +112,18 @@ async def lifespan(app: FastAPI):
         - Initialize asyncpg connection pool (M3, Day 1) [DONE]
         - Initialize async Redis connection (M1, Day 3) [DONE]
         - Start Redis pub/sub subscriber task (M1, Day 5) [DONE]
-        - Start autosave background task (M3, Day 9) [DONE]
-        - TODO (Day 10): Start cleanup scheduler (M3)
+        - TODO (Day 9):   Start autosave background task (M3)
+        - TODO (Day 9):   Start cleanup scheduler (M3)
 
     Shutdown:
-        - Cancel autosave background task (M3, Day 9) [DONE]
         - Cancel pub/sub subscriber task (M1, Day 5) [DONE]
         - Close asyncpg pool (M3, Day 1) [DONE]
         - Close Redis connection (M1, Day 3) [DONE]
+        - TODO: Cancel remaining background tasks
     """
     # asyncio is imported at module level (Day 7)
 
     pubsub_task: asyncio.Task | None = None
-    autosave_task: asyncio.Task | None = None
 
     # -- Startup --------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend starting...")
@@ -166,28 +163,10 @@ async def lifespan(app: FastAPI):
     else:
         print(f"[{SERVER_ID}] WARNING: REDIS_URL not set — pub/sub subscriber skipped")
 
-    # Start autosave background task (M3, Day 9)
-    # Runs every 60s, protected by the Redis lock:autosave distributed lock.
-    # Only one backend instance will execute the autosave per cycle.
-    try:
-        autosave_task = start_autosave_loop(server_id=SERVER_ID)
-        print(f"[{SERVER_ID}] Autosave background task started (60s interval)")
-    except Exception as exc:
-        print(f"[{SERVER_ID}] WARNING: Failed to start autosave task: {exc}")
-
     yield  # Application is running
 
     # -- Shutdown -------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend shutting down...")
-
-    # Cancel autosave background task (M3, Day 9)
-    if autosave_task is not None and not autosave_task.done():
-        autosave_task.cancel()
-        try:
-            await autosave_task
-        except asyncio.CancelledError:
-            pass
-        print(f"[{SERVER_ID}] Autosave background task stopped")
 
     # Cancel pub/sub subscriber task (M1, Day 5)
     if pubsub_task is not None and not pubsub_task.done():
@@ -243,32 +222,19 @@ async def health_check():
     redis_status = "disconnected"
     if redis_client.redis_conn is not None:
         try:
-            await asyncio.wait_for(redis_client.redis_conn.ping(), timeout=1.0)
+            await redis_client.redis_conn.ping()
             redis_status = "connected"
         except Exception:
-            redis_status = "unreachable"
+            redis_status = "error"
 
     # Check PostgreSQL connectivity
     from backend.db import pool as db_pool
-    pg_status = "disconnected"
-    if db_pool is not None:
-        try:
-            await asyncio.wait_for(db_pool.fetchval("SELECT 1"), timeout=1.0)
-            pg_status = "connected"
-        except Exception:
-            pg_status = "unreachable"
-
-    status_code = 200
-    overall_status = "ok"
-
-    if redis_status == "unreachable" or pg_status == "unreachable":
-        status_code = 503
-        overall_status = "degraded"
+    pg_status = "connected" if db_pool is not None else "disconnected"
 
     return JSONResponse(
-        status_code=status_code,
+        status_code=200,
         content={
-            "status": overall_status,
+            "status": "ok",
             "server_id": SERVER_ID,
             "server_version": SERVER_VERSION,
             "uptime_seconds": uptime,
@@ -487,9 +453,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # -- ping / pong (app-level heartbeat) ----------------------------
             if msg_type == "ping":
-                # Refresh Redis session TTL (Day 9, ISSUE-01)
-                if client.user_id:
-                    await refresh_session_ttl(client.user_id)
                 await websocket.send_text(json.dumps({"type": "pong"}))
                 continue
 
