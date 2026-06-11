@@ -546,6 +546,50 @@ async def get_room_seq(room_id: str) -> Optional[int]:
     return row
 
 
+async def _record_action_history(
+    conn: asyncpg.Connection,
+    room_id: str,
+    user_id: str,
+    seq_num: int,
+    op_type: str,
+    obj_id: str,
+    forward_data: dict,
+    inverse_data: dict,
+) -> None:
+    """
+    Record an action into the action_history table and enforce the 50-action limit.
+    """
+    await conn.execute(
+        """
+        INSERT INTO action_history
+            (room_id, user_id, seq_num, op_type, obj_id, forward_data, inverse_data)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+        """,
+        room_id,
+        _uuid.UUID(user_id),
+        seq_num,
+        op_type,
+        _uuid.UUID(obj_id),
+        _json.dumps(forward_data),
+        _json.dumps(inverse_data),
+    )
+
+    await conn.execute(
+        """
+        DELETE FROM action_history
+        WHERE action_id IN (
+            SELECT action_id
+            FROM action_history
+            WHERE room_id = $1 AND user_id = $2
+            ORDER BY seq_num DESC
+            OFFSET 50
+        )
+        """,
+        room_id,
+        _uuid.UUID(user_id),
+    )
+
+
 # =========================================================================
 # CRUD — canvas_objects (Day 4, M3)
 # =========================================================================
@@ -635,6 +679,26 @@ async def insert_canvas_object(
                 _json.dumps(properties),
             )
 
+            # Record in action_history (Day 8)
+            forward_data = {
+                "op": "add",
+                "object": {
+                    "obj_id": str(obj_id),
+                    "obj_type": obj_type,
+                    "z_index": z_index,
+                    "color": color,
+                    "stroke_width": stroke_width,
+                    "properties": properties,
+                }
+            }
+            inverse_data = {
+                "op": "delete",
+                "obj_id": str(obj_id),
+            }
+            await _record_action_history(
+                conn, room_id, user_id, seq, "add", str(obj_id), forward_data, inverse_data
+            )
+
     return (
         seq,
         str(obj_row["obj_id"]),
@@ -644,6 +708,7 @@ async def insert_canvas_object(
 
 async def update_canvas_object(
     room_id: str,
+    user_id: str,
     obj_id: str,
     changes: dict,
 ) -> Optional[Tuple[int, str]]:
@@ -673,6 +738,7 @@ async def update_canvas_object(
 
     Args:
         room_id: 6-character room code (for seq_counter increment).
+        user_id: UUID v4 string of the modifying user.
         obj_id: UUID v4 string of the target object.
         changes: Validated changes dict (from ``ModifyChangesPayload``).
 
@@ -722,7 +788,32 @@ async def update_canvas_object(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Step 1: Attempt the canvas object update first
+            # Step 1: Read existing row for undo tracking (Day 8)
+            old_row = await conn.fetchrow(
+                """
+                SELECT color, stroke_width, z_index, properties
+                FROM canvas_objects
+                WHERE obj_id = $1 AND is_deleted = FALSE
+                """,
+                _uuid.UUID(obj_id)
+            )
+            if old_row is None:
+                # Object not found or already deleted — no seq consumed
+                return None
+
+            # Calculate inverse data
+            old_changes = {}
+            if "color" in changes: old_changes["color"] = old_row["color"]
+            if "stroke_width" in changes: old_changes["stroke_width"] = old_row["stroke_width"]
+            if "z_index" in changes: old_changes["z_index"] = old_row["z_index"]
+            if "properties" in changes and changes["properties"] is not None:
+                old_props = _json.loads(old_row["properties"])
+                prop_changes = {}
+                for k in changes["properties"].keys():
+                    prop_changes[k] = old_props.get(k)
+                old_changes["properties"] = prop_changes
+
+            # Step 2: Attempt the canvas object update
             obj_row = await conn.fetchrow(update_sql, *params)
 
             if obj_row is None:
@@ -746,11 +837,19 @@ async def update_canvas_object(
 
             seq = seq_row["seq_counter"]
 
+            # Record in action_history
+            forward_data = {"op": "modify", "obj_id": obj_id, "changes": changes}
+            inverse_data = {"op": "modify", "obj_id": obj_id, "changes": old_changes}
+            await _record_action_history(
+                conn, room_id, user_id, seq, "modify", obj_id, forward_data, inverse_data
+            )
+
     return (seq, str(obj_row["obj_id"]))
 
 
 async def soft_delete_canvas_object(
     room_id: str,
+    user_id: str,
     obj_id: str,
 ) -> Optional[Tuple[int, str]]:
     """
@@ -774,6 +873,7 @@ async def soft_delete_canvas_object(
 
     Args:
         room_id: 6-character room code (for seq_counter increment).
+        user_id: UUID v4 string of the modifying user.
         obj_id: UUID v4 string of the target object.
 
     Returns:
@@ -789,7 +889,20 @@ async def soft_delete_canvas_object(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Step 1: Soft-delete the canvas object
+            # Step 1: Read existing row for undo tracking (Day 8)
+            old_row = await conn.fetchrow(
+                """
+                SELECT obj_type, z_index, color, stroke_width, properties
+                FROM canvas_objects
+                WHERE obj_id = $1 AND is_deleted = FALSE
+                """,
+                _uuid.UUID(obj_id)
+            )
+            if old_row is None:
+                # Object not found or already deleted — no seq consumed
+                return None
+
+            # Step 2: Soft-delete the canvas object
             obj_row = await conn.fetchrow(
                 """
                 UPDATE canvas_objects
@@ -821,6 +934,23 @@ async def soft_delete_canvas_object(
                 raise RuntimeError(f"Room {room_id} not found")
 
             seq = seq_row["seq_counter"]
+
+            # Record in action_history
+            forward_data = {"op": "delete", "obj_id": obj_id}
+            inverse_data = {
+                "op": "add",
+                "object": {
+                    "obj_id": obj_id,
+                    "obj_type": old_row["obj_type"],
+                    "z_index": old_row["z_index"],
+                    "color": old_row["color"],
+                    "stroke_width": old_row["stroke_width"],
+                    "properties": _json.loads(old_row["properties"]),
+                }
+            }
+            await _record_action_history(
+                conn, room_id, user_id, seq, "delete", obj_id, forward_data, inverse_data
+            )
 
     return (seq, str(obj_row["obj_id"]))
 
