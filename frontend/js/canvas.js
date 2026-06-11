@@ -28,10 +28,16 @@ class CanvasRenderer {
 
         /** 
          * The committed state of the canvas.
-         * An array of object payloads received from the server or local. 
-         * @type {Array<Object>} 
+         * A Map of object payloads received from the server or local. 
+         * @type {Map<string, Object>} 
          */
-        this.objects = [];
+        this.objects = new Map();
+        
+        /**
+         * Queue of temporary IDs awaiting op_ack for 'add' operations.
+         * @type {string[]}
+         */
+        this.pendingAdds = [];
 
         // Bind the render loop to this instance
         this.renderLoop = this.renderLoop.bind(this);
@@ -57,9 +63,11 @@ class CanvasRenderer {
      */
     handleSnapshot(data) {
         console.log(`[CollabCanvas] Received snapshot with ${data.objects.length} objects.`);
-        this.objects = data.objects;
-        // Sort by z_index just in case
-        this.objects.sort((a, b) => a.z_index - b.z_index);
+        this.objects.clear();
+        this.pendingAdds = [];
+        for (const obj of data.objects) {
+            this.objects.set(obj.obj_id, obj);
+        }
     }
 
     /**
@@ -68,21 +76,54 @@ class CanvasRenderer {
      */
     handleOpBroadcast(data) {
         if (data.op === 'add') {
-            this.objects.push(data.object);
-            this.objects.sort((a, b) => a.z_index - b.z_index);
+            const obj = data.object;
+            if (data.seq !== undefined) obj.seq = data.seq;
+            this.objects.set(obj.obj_id, obj);
+        } else if (data.op === 'modify') {
+            const existing = this.objects.get(data.obj_id);
+            if (existing) {
+                const changes = data.changes || {};
+                if (changes.color) existing.color = changes.color;
+                if (changes.stroke_width !== undefined) existing.stroke_width = changes.stroke_width;
+                if (changes.z_index !== undefined) existing.z_index = changes.z_index;
+                if (changes.properties) {
+                    existing.properties = { ...existing.properties, ...changes.properties };
+                }
+                if (data.seq !== undefined) existing.seq = data.seq;
+            }
+        } else if (data.op === 'delete') {
+            const existing = this.objects.get(data.obj_id);
+            if (existing) {
+                existing.is_deleted = true;
+                if (data.seq !== undefined) existing.seq = data.seq;
+            }
         }
     }
 
     /**
      * Handles acknowledgment of our own operation.
-     * For now, our own operation is added optimistically in tools.js.
-     * When ack arrives, we could update the temporary obj_id.
      * @param {Object} data - The op_ack payload
      */
     handleOpAck(data) {
-        // Find the optimistic object with matching temp ID and update it.
-        // For Day 4, since we assign a local ID, we look it up.
-        // We'll implement this properly when optimistic updates are fully mapped.
+        if (!this.objects.has(data.obj_id)) {
+            // Ack for a new 'add' operation
+            if (this.pendingAdds.length > 0) {
+                const tempId = this.pendingAdds.shift();
+                const obj = this.objects.get(tempId);
+                if (obj) {
+                    obj.obj_id = data.obj_id;
+                    obj.seq = data.seq;
+                    this.objects.delete(tempId);
+                    this.objects.set(data.obj_id, obj);
+                }
+            }
+        } else {
+            // Ack for modify or delete
+            const obj = this.objects.get(data.obj_id);
+            if (obj) {
+                obj.seq = data.seq;
+            }
+        }
     }
 
     /**
@@ -90,8 +131,10 @@ class CanvasRenderer {
      * @param {Object} obj 
      */
     addOptimisticObject(obj) {
-        this.objects.push(obj);
-        this.objects.sort((a, b) => a.z_index - b.z_index);
+        this.objects.set(obj.obj_id, obj);
+        if (obj.obj_id.startsWith('temp-')) {
+            this.pendingAdds.push(obj.obj_id);
+        }
     }
 
     /**
@@ -105,9 +148,17 @@ class CanvasRenderer {
         this.ctx.lineCap = 'round';
         this.ctx.lineJoin = 'round';
 
+        // Sort objects by z_index, then by seq (fallback)
+        const sortedObjects = Array.from(this.objects.values()).sort((a, b) => {
+            if (a.z_index !== b.z_index) return a.z_index - b.z_index;
+            return (a.seq || 0) - (b.seq || 0);
+        });
+
         // 3. Draw all committed objects
-        for (const obj of this.objects) {
-            this.drawObject(obj);
+        for (const obj of sortedObjects) {
+            if (!obj.is_deleted) {
+                this.drawObject(obj);
+            }
         }
 
         // 4. Draw the in-progress tool stroke on top

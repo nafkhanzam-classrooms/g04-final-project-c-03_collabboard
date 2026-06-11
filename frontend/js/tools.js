@@ -145,7 +145,7 @@ class ToolManagerClass {
         // Construct the full payload required by API_CONTRACT.md §9
         const payload = {
             obj_type: this.activePreview.obj_type,
-            z_index: window.CollabCanvas.objects.length, // Put on top
+            z_index: window.CollabCanvas.objects.size, // Put on top
             color: this.activePreview.color,
             stroke_width: this.activePreview.stroke_width,
             properties: this.activePreview.properties
@@ -153,7 +153,23 @@ class ToolManagerClass {
 
         // 1. Optimistic Update (Local Render)
         // Give it a temporary UUID until the server acks it
-        const tempId = 'temp-' + crypto.randomUUID();
+        // Use a fallback for crypto.randomUUID() as Brave Shields may block it
+        const generateUUID = () => {
+            try {
+                if (window.crypto && window.crypto.randomUUID) {
+                    return window.crypto.randomUUID();
+                }
+            } catch (e) {
+                // Ignore and use fallback (Brave Shields can throw on call)
+            }
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        };
+        
+        const tempId = 'temp-' + generateUUID();
         const optimisticObj = {
             ...payload,
             obj_id: tempId,

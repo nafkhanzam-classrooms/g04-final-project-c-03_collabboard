@@ -26,6 +26,13 @@
 #   - Disconnect cleanup now handles users who were in a room
 #   - /health endpoint shows active room count
 #
+# Day 5 changes:
+#   - Integrated Redis pub/sub subscriber task (backend/pubsub.py)
+#   - Subscriber starts on lifespan startup, cancelled on shutdown
+#   - Uses dedicated Redis connection with PSUBSCRIBE room:*
+#   - Cross-server messages relayed to local clients via ConnectionManager
+#   - Anti-echo: messages with _server_id == MY_SERVER_ID are filtered out
+#
 # Reference:
 #   - IMPLEMENTATION_PLAN.md §1, §2
 #   - API_CONTRACT.md §1 (hello), §3 (ping/pong), §4-6 (rooms), §GET /health
@@ -69,6 +76,7 @@ from backend.rooms import (
     handle_disconnect_cleanup,
 )
 from backend.sync import handle_op
+from backend.pubsub import start_subscriber
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -108,15 +116,20 @@ async def lifespan(app: FastAPI):
     Startup:
         - Initialize asyncpg connection pool (M3, Day 1) [DONE]
         - Initialize async Redis connection (M1, Day 3) [DONE]
-        - TODO (Day 5):   Start Redis pub/sub subscriber task (M1)
+        - Start Redis pub/sub subscriber task (M1, Day 5) [DONE]
         - TODO (Day 9):   Start autosave background task (M3)
         - TODO (Day 9):   Start cleanup scheduler (M3)
 
     Shutdown:
+        - Cancel pub/sub subscriber task (M1, Day 5) [DONE]
         - Close asyncpg pool (M3, Day 1) [DONE]
         - Close Redis connection (M1, Day 3) [DONE]
-        - TODO: Cancel background tasks
+        - TODO: Cancel remaining background tasks
     """
+    import asyncio
+
+    pubsub_task: asyncio.Task | None = None
+
     # -- Startup --------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend starting...")
     print(f"[{SERVER_ID}] DATABASE_URL = {DATABASE_URL}")
@@ -138,10 +151,36 @@ async def lifespan(app: FastAPI):
         print(f"[{SERVER_ID}] WARNING: Failed to initialize Redis: {exc}")
         print(f"[{SERVER_ID}] Server will start without Redis connectivity.")
 
+    # Start Redis pub/sub subscriber task (M1, Day 5)
+    # Uses a SEPARATE Redis connection dedicated to PSUBSCRIBE room:*.
+    # The subscriber relays cross-server messages to local WebSocket clients
+    # and filters out self-published messages via _server_id anti-echo check.
+    if REDIS_URL:
+        try:
+            pubsub_task = start_subscriber(
+                manager=manager,
+                server_id=SERVER_ID,
+                redis_url=REDIS_URL,
+            )
+            print(f"[{SERVER_ID}] Redis pub/sub subscriber task started")
+        except Exception as exc:
+            print(f"[{SERVER_ID}] WARNING: Failed to start pub/sub subscriber: {exc}")
+    else:
+        print(f"[{SERVER_ID}] WARNING: REDIS_URL not set — pub/sub subscriber skipped")
+
     yield  # Application is running
 
     # -- Shutdown -------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend shutting down...")
+
+    # Cancel pub/sub subscriber task (M1, Day 5)
+    if pubsub_task is not None and not pubsub_task.done():
+        pubsub_task.cancel()
+        try:
+            await pubsub_task
+        except asyncio.CancelledError:
+            pass
+        print(f"[{SERVER_ID}] Redis pub/sub subscriber task stopped")
 
     # Close Redis connection (M1, Day 3)
     try:

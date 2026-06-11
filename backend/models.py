@@ -288,3 +288,47 @@ class AddObjectPayload(BaseModel):
             raise ValueError(f"No property validator for obj_type: {self.obj_type}")
         validator_cls.model_validate(self.properties)
         return self
+
+
+# ---------------------------------------------------------------------------
+# Modify-operation changes model (Day 5, M3)
+# ---------------------------------------------------------------------------
+
+class ModifyChangesPayload(BaseModel):
+    """
+    Validates the ``changes`` dict inside an ``op: "modify"`` message.
+
+    Reference: API_CONTRACT.md §10
+
+    Allowed keys (all optional — at least one must be present):
+        - ``color``: ``#RRGGBB`` hex string.
+        - ``stroke_width``: Integer ≥ 0.
+        - ``z_index``: Integer ≥ 0.
+        - ``properties``: Partial dict merged into existing JSONB via ``||``.
+
+    Unknown keys are silently ignored (``extra = "ignore"``).
+    """
+
+    model_config = {"extra": "ignore"}
+
+    color: Optional[str] = None
+    stroke_width: Optional[int] = Field(default=None, ge=0)
+    z_index: Optional[int] = Field(default=None, ge=0)
+    properties: Optional[dict] = None
+
+    @field_validator("color")
+    @classmethod
+    def validate_color(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not _HEX_COLOR_RE.match(v):
+            raise ValueError("color must be a valid #RRGGBB hex string")
+        return v
+
+    @model_validator(mode="after")
+    def at_least_one_change(self) -> "ModifyChangesPayload":
+        """Ensure the changes dict is not completely empty after filtering."""
+        if all(
+            v is None
+            for v in (self.color, self.stroke_width, self.z_index, self.properties)
+        ):
+            raise ValueError("changes must contain at least one valid key")
+        return self

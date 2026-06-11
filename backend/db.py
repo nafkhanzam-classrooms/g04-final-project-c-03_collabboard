@@ -35,9 +35,9 @@ Exposes:
 Day 4 (M3):
     - insert_canvas_object — atomic seq + insert in one transaction
 
-TODO (Day 5+, M3):
-    - update_object (JSONB merge), soft_delete_object
-    - load_canvas snapshot query
+Day 5 (M3):
+    - update_canvas_object  — atomic seq + JSONB merge in one transaction
+    - soft_delete_canvas_object — atomic seq + soft-delete in one transaction
 """
 
 from __future__ import annotations
@@ -637,3 +637,187 @@ async def insert_canvas_object(
         str(obj_row["obj_id"]),
         obj_row["created_at"].isoformat(),
     )
+
+
+async def update_canvas_object(
+    room_id: str,
+    obj_id: str,
+    changes: dict,
+) -> Optional[Tuple[int, str]]:
+    """
+    Atomically modify a canvas object and increment the room's seq_counter.
+
+    Both operations execute inside a **single transaction** so the
+    ``seq_counter`` is rolled back if the ``UPDATE`` fails (no sequence
+    gaps).
+
+    The ``changes`` dict may contain any combination of:
+        - ``color`` (str): New ``#RRGGBB`` hex color.
+        - ``stroke_width`` (int): New stroke width in pixels.
+        - ``z_index`` (int): New draw order.
+        - ``properties`` (dict): Partial JSONB merge — only provided
+          keys are overwritten, existing keys are preserved via
+          PostgreSQL ``||`` operator.
+
+    Only objects where ``is_deleted = FALSE`` are eligible for update.
+    If the object does not exist or has been soft-deleted, returns
+    ``None`` (caller should send ``op_rejected("object_not_found")``).
+
+    Transaction strategy (per POSTGRESQL_MIGRATION.md §6):
+        - Isolation: READ COMMITTED (default)
+        - ``UPDATE canvas_objects SET ... WHERE obj_id = $1 AND is_deleted = FALSE``
+        - Check rowcount; if 0 → return None (no seq consumed)
+
+    Args:
+        room_id: 6-character room code (for seq_counter increment).
+        obj_id: UUID v4 string of the target object.
+        changes: Validated changes dict (from ``ModifyChangesPayload``).
+
+    Returns:
+        A 2-tuple ``(seq, obj_id)`` on success, or ``None`` if the
+        object was not found / already deleted.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized or
+            the room does not exist.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    # --- Build dynamic SET clause for canvas_objects -------------------------
+    set_parts: list[str] = []
+    params: list = []
+    param_idx = 1  # asyncpg uses $1, $2, ...
+
+    # Column-level changes
+    for col in ("color", "stroke_width", "z_index"):
+        if col in changes and changes[col] is not None:
+            set_parts.append(f"{col} = ${param_idx}")
+            params.append(changes[col])
+            param_idx += 1
+
+    # JSONB merge for properties (partial update via || operator)
+    if "properties" in changes and changes["properties"] is not None:
+        set_parts.append(f"properties = properties || ${param_idx}::jsonb")
+        params.append(_json.dumps(changes["properties"]))
+        param_idx += 1
+
+    if not set_parts:
+        # Nothing to update (should not happen if ModifyChangesPayload validated)
+        return None
+
+    # Add obj_id and is_deleted guard to WHERE clause
+    obj_id_param = f"${param_idx}"
+    params.append(_uuid.UUID(obj_id))
+    param_idx += 1
+
+    update_sql = (
+        f"UPDATE canvas_objects SET {', '.join(set_parts)} "
+        f"WHERE obj_id = {obj_id_param} AND is_deleted = FALSE "
+        f"RETURNING obj_id"
+    )
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Step 1: Attempt the canvas object update first
+            obj_row = await conn.fetchrow(update_sql, *params)
+
+            if obj_row is None:
+                # Object not found or already deleted — no seq consumed
+                return None
+
+            # Step 2: Atomically increment seq_counter (only if update succeeded)
+            seq_row = await conn.fetchrow(
+                """
+                UPDATE rooms
+                SET seq_counter   = seq_counter + 1,
+                    last_activity = now(),
+                    is_dirty      = TRUE
+                WHERE room_id = $1
+                RETURNING seq_counter
+                """,
+                room_id,
+            )
+            if seq_row is None:
+                raise RuntimeError(f"Room {room_id} not found")
+
+            seq = seq_row["seq_counter"]
+
+    return (seq, str(obj_row["obj_id"]))
+
+
+async def soft_delete_canvas_object(
+    room_id: str,
+    obj_id: str,
+) -> Optional[Tuple[int, str]]:
+    """
+    Atomically soft-delete a canvas object and increment the room's seq_counter.
+
+    Sets ``is_deleted = TRUE`` on the target row. Only objects that are
+    currently ``is_deleted = FALSE`` can be deleted. If the object does
+    not exist or is already deleted, returns ``None`` (caller should
+    send ``op_rejected("object_not_found")``).
+
+    Also decrements ``rooms.total_objects`` by 1 to keep the count
+    consistent with the number of live canvas objects.
+
+    Both mutations execute inside a **single transaction** so the
+    ``seq_counter`` is rolled back if the soft-delete fails.
+
+    Transaction strategy (per POSTGRESQL_MIGRATION.md §6):
+        - Isolation: READ COMMITTED (default)
+        - ``UPDATE canvas_objects SET is_deleted = TRUE WHERE obj_id = $1 AND is_deleted = FALSE``
+        - Check rowcount; if 0 → return None (no seq consumed)
+
+    Args:
+        room_id: 6-character room code (for seq_counter increment).
+        obj_id: UUID v4 string of the target object.
+
+    Returns:
+        A 2-tuple ``(seq, obj_id)`` on success, or ``None`` if the
+        object was not found / already deleted.
+
+    Raises:
+        RuntimeError: If the connection pool is not initialized or
+            the room does not exist.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Step 1: Soft-delete the canvas object
+            obj_row = await conn.fetchrow(
+                """
+                UPDATE canvas_objects
+                SET is_deleted = TRUE
+                WHERE obj_id = $1 AND is_deleted = FALSE
+                RETURNING obj_id
+                """,
+                _uuid.UUID(obj_id),
+            )
+
+            if obj_row is None:
+                # Object not found or already deleted — no seq consumed
+                return None
+
+            # Step 2: Atomically increment seq_counter and decrement total_objects
+            seq_row = await conn.fetchrow(
+                """
+                UPDATE rooms
+                SET seq_counter   = seq_counter + 1,
+                    last_activity = now(),
+                    is_dirty      = TRUE,
+                    total_objects = GREATEST(total_objects - 1, 0)
+                WHERE room_id = $1
+                RETURNING seq_counter
+                """,
+                room_id,
+            )
+            if seq_row is None:
+                raise RuntimeError(f"Room {room_id} not found")
+
+            seq = seq_row["seq_counter"]
+
+    return (seq, str(obj_row["obj_id"]))
+

@@ -27,7 +27,7 @@
  * Central state object for the entire frontend application.
  * Expanded on Day 2 with network-related fields.
  */
-const AppState = {
+const AppState = window.AppState = {
     /** @type {'select'|'pencil'|'text'|'rectangle'|'circle'|'line'|'arrow'|'heart'|'image'} */
     activeTool: 'select',
 
@@ -229,7 +229,7 @@ window.addEventListener('resize', handleResize);
 // ---------------------------------------------------------------------------
 
 /** @type {NetworkManager} Singleton network manager */
-const network = new NetworkManager();
+const network = window.network = new NetworkManager();
 
 /**
  * Generate a temporary username for auto-connect.
