@@ -120,11 +120,9 @@ const DOM = {
     fillColorSwatch: document.getElementById('tool-fill-swatch'),
     fillControls: document.getElementById('fill-controls'),
     fillSeparator: document.getElementById('fill-separator'),
-    strokeWidthSelect: document.getElementById('tool-stroke-width'),
     fontSizeSelect: document.getElementById('tool-font-size'),
-    sidebarToggle: document.getElementById('toolbar-sidebar-toggle'),
     participants: document.getElementById('toolbar-participants'),
-    exportBtn: document.getElementById('toolbar-export-btn'),
+    pngExportBtn: document.getElementById('toolbar-export-btn'),
     toast: document.getElementById('toast'),
 
     // Sidebar
