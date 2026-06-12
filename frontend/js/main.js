@@ -817,8 +817,14 @@ function selectActiveShape() {
 }
 
 // ---------------------------------------------------------------------------
-// Export / Import .collab
+// Export / Import .collab and PNG
 // ---------------------------------------------------------------------------
+DOM.pngExportBtn.addEventListener('click', () => {
+    if (window.CollabCanvas) {
+        window.CollabCanvas.exportToPNG();
+    }
+});
+
 DOM.exportBtn.addEventListener('click', () => {
     DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
     if (!window.CollabCanvas) return;
