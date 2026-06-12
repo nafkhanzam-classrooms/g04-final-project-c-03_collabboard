@@ -231,12 +231,12 @@ async def _handle_add(
     if image_meta:
         try:
             await db.insert_image(
-                image_id=image_meta["image_id"],
+                image_id=str(image_meta["image_id"]),
                 room_id=room_id,
                 obj_id=obj_id,
-                filename=image_meta["filename"],
-                mime_type=image_meta["mime_type"],
-                file_size=image_meta["file_size"],
+                filename=str(image_meta["filename"]),
+                mime_type=str(image_meta["mime_type"]),
+                file_size=int(image_meta["file_size"]),
             )
         except Exception as exc:
             print(f"[sync] ERROR: insert_image failed: {exc}")
