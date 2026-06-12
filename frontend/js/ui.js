@@ -33,7 +33,31 @@
         DOM.modalJoinBtn.disabled = isLoading;
         DOM.modalCreateBtn.disabled = isLoading;
         DOM.modalJoinBtn.textContent = isLoading ? 'Connecting...' : 'Join Room';
-        DOM.modalCreateBtn.textContent = isLoading ? 'Connecting...' : 'Create New Room';
+        DOM.modalCreateBtn.textContent = isLoading ? 'Connecting...' : 'Create Room';
+    }
+
+    function switchModalTab(tab) {
+        clearError();
+        if (tab === 'create') {
+            DOM.modalTabCreate.classList.add('active');
+            DOM.modalTabJoin.classList.remove('active');
+            DOM.modalFieldRoomCode.style.display = 'none';
+            DOM.modalCreateBtn.style.display = 'block';
+            DOM.modalJoinBtn.style.display = 'none';
+            setTimeout(() => DOM.modalUsername.focus(), 50);
+        } else {
+            DOM.modalTabJoin.classList.add('active');
+            DOM.modalTabCreate.classList.remove('active');
+            DOM.modalFieldRoomCode.style.display = 'flex';
+            DOM.modalJoinBtn.style.display = 'block';
+            DOM.modalCreateBtn.style.display = 'none';
+            setTimeout(() => DOM.modalRoomCode.focus(), 50);
+        }
+    }
+
+    if (DOM.modalTabCreate && DOM.modalTabJoin) {
+        DOM.modalTabCreate.addEventListener('click', () => switchModalTab('create'));
+        DOM.modalTabJoin.addEventListener('click', () => switchModalTab('join'));
     }
 
     function handleConnect(action) {
@@ -81,7 +105,10 @@
 
     // Allow Enter key to submit
     DOM.modalUsername.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleConnect(DOM.modalRoomCode.value.trim() ? 'join' : 'create');
+        if (e.key === 'Enter') {
+            const isJoin = DOM.modalTabJoin.classList.contains('active');
+            handleConnect(isJoin ? 'join' : 'create');
+        }
     });
     DOM.modalRoomCode.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') handleConnect('join');

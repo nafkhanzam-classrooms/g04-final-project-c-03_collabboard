@@ -139,11 +139,18 @@ const DOM = {
 
     // Modal
     roomModal: document.getElementById('room-modal'),
+    modalTabCreate: document.getElementById('modal-tab-create'),
+    modalTabJoin: document.getElementById('modal-tab-join'),
     modalUsername: document.getElementById('modal-username'),
     modalRoomCode: document.getElementById('modal-room-code'),
+    modalFieldRoomCode: document.getElementById('modal-field-room-code'),
     modalError: document.getElementById('modal-error'),
     modalJoinBtn: document.getElementById('modal-join-btn'),
     modalCreateBtn: document.getElementById('modal-create-btn'),
+    leaveBtn: document.getElementById('menu-leave-room'),
+    leaveModal: document.getElementById('leave-modal'),
+    leaveCancelBtn: document.getElementById('leave-cancel-btn'),
+    leaveProceedBtn: document.getElementById('leave-proceed-btn'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1119,76 @@ DOM.importFile.addEventListener('change', (e) => {
     reader.readAsText(file);
     e.target.value = ''; // Reset
 });
+
+// ---------------------------------------------------------------------------
+// Room & UI Helpers
+// ---------------------------------------------------------------------------
+
+// Copy room code
+if (DOM.toolbarRoomName) {
+    DOM.toolbarRoomName.style.cursor = 'pointer';
+    DOM.toolbarRoomName.title = 'Copy room code';
+    DOM.toolbarRoomName.addEventListener('click', () => {
+        if (AppState.roomId) {
+            navigator.clipboard.writeText(AppState.roomId).then(() => {
+                const originalText = DOM.toolbarRoomName.textContent;
+                DOM.toolbarRoomName.textContent = 'Copied!';
+                setTimeout(() => {
+                    DOM.toolbarRoomName.textContent = originalText;
+                }, 2000);
+            });
+        }
+    });
+}
+
+// Leave Room Flow
+if (DOM.leaveBtn) {
+    DOM.leaveBtn.addEventListener('click', () => {
+        DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
+        DOM.leaveModal.setAttribute('aria-hidden', 'false');
+    });
+
+    DOM.leaveCancelBtn.addEventListener('click', () => {
+        DOM.leaveModal.setAttribute('aria-hidden', 'true');
+    });
+
+    DOM.leaveProceedBtn.addEventListener('click', () => {
+        DOM.leaveModal.setAttribute('aria-hidden', 'true');
+        
+        // Disconnect from server
+        if (window.network) {
+            window.network.disconnect();
+        }
+        
+        // Clear local state
+        AppState.roomId = null;
+        AppState.isHost = false;
+        
+        // Clear canvas
+        if (window.CollabCanvas) {
+            if (typeof window.CollabCanvas.clearSelection === 'function') window.CollabCanvas.clearSelection();
+            if (window.CollabCanvas.objects) window.CollabCanvas.objects.clear();
+            if (window.CollabCanvas.pendingAdds) window.CollabCanvas.pendingAdds = [];
+        }
+        
+        // Clear undo/redo
+        if (window.UndoRedoManager) {
+            window.UndoRedoManager.undoStack = [];
+            window.UndoRedoManager.redoStack = [];
+            window.UndoRedoManager.updateStatus();
+        }
+        
+        // Update UI
+        DOM.roomModal.setAttribute('aria-hidden', 'false');
+        DOM.statusRoom.textContent = 'No room';
+        DOM.statusConnection.innerHTML = '<span class="status-bar__dot"></span>Disconnected';
+        DOM.statusConnection.className = 'status-bar__indicator status-bar__indicator--disconnected';
+        DOM.statusUsers.textContent = '0 users';
+        DOM.participantList.innerHTML = '';
+        DOM.participants.innerHTML = '';
+        showToast('Left the room.');
+    });
+}
 
 // ---------------------------------------------------------------------------
 // UI Initialization
