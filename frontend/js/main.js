@@ -145,7 +145,13 @@ function setActiveTool(toolName) {
 
 DOM.toolButtons.forEach(btn => {
     btn.addEventListener('click', () => {
-        setActiveTool(btn.dataset.tool);
+        const tool = btn.dataset.tool;
+        if (tool === 'image') {
+            const uploadInput = document.getElementById('image-upload-input');
+            if (uploadInput) uploadInput.click();
+            return;
+        }
+        setActiveTool(tool);
     });
 });
 

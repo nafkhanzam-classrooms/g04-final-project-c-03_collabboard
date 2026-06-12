@@ -60,6 +60,13 @@ class CanvasRenderer {
          */
         this.tombstones = new Set();
 
+        /**
+         * Day 10: Cache of HTMLImageElement instances keyed by base64 data hash.
+         * Prevents re-creating Image objects every frame in the render loop.
+         * @type {Map<string, HTMLImageElement>}
+         */
+        this.imageCache = new Map();
+
         // Bind the render loop to this instance
         this.renderLoop = this.renderLoop.bind(this);
     }
@@ -368,9 +375,21 @@ class CanvasRenderer {
             }
 
             case 'image':
-                // Image rendering is a Day 10 task (requires HTMLImageElement cache)
-                // For now, draw a placeholder rectangle with a label
-                if (properties.width && properties.height) {
+                if (properties.base64 && properties.width && properties.height) {
+                    // Use a short hash of the base64 string as cache key
+                    const cacheKey = properties.base64.substring(0, 64) + '_' + properties.base64.length;
+                    let img = this.imageCache.get(cacheKey);
+                    if (!img) {
+                        img = new Image();
+                        img.src = properties.base64;
+                        this.imageCache.set(cacheKey, img);
+                    }
+                    // Only draw once the image has fully decoded
+                    if (img.complete && img.naturalWidth > 0) {
+                        this.ctx.drawImage(img, properties.x, properties.y, properties.width, properties.height);
+                    }
+                } else if (properties.width && properties.height) {
+                    // Fallback placeholder if no base64 data (legacy objects)
                     this.ctx.strokeStyle = '#888';
                     this.ctx.setLineDash([6, 4]);
                     this.ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);

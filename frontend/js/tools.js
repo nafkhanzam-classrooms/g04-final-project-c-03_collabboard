@@ -22,6 +22,7 @@ class ToolManagerClass {
         
         // Stores the state of the current stroke/shape in progress
         this.activePreview = null;
+        this.hoverPreview = null;
 
         // Bind event handlers
         this.onMouseDown = this.onMouseDown.bind(this);
@@ -82,13 +83,34 @@ class ToolManagerClass {
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points = [[x, y]];
+        } else if (this.activePreview.obj_type === 'image_placement') {
+            this.activePreview.properties.x = x;
+            this.activePreview.properties.y = y;
+            this.activePreview.properties.width = 0;
+            this.activePreview.properties.height = 0;
+            
+            // Copy data from the global preview state
+            this.activePreview.properties.base64 = window.AppState.previewImage.base64;
+            this.activePreview.properties.naturalWidth = window.AppState.previewImage.naturalWidth;
+            this.activePreview.properties.naturalHeight = window.AppState.previewImage.naturalHeight;
+            this.activePreview.properties.original_filename = window.AppState.previewImage.original_filename;
         }
     }
 
     onMouseMove(e) {
-        if (!this.isDrawing || !this.activePreview) return;
-
         const { x, y } = this.getLogicalCoordinates(e);
+
+        if (!this.isDrawing) {
+            // Hover preview for image placement
+            if (window.AppState.activeTool === 'image_placement' && window.AppState.previewImage) {
+                this.hoverPreview = { x, y };
+            } else {
+                this.hoverPreview = null;
+            }
+            return;
+        }
+
+        if (!this.activePreview) return;
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points.push([x, y]);
@@ -98,6 +120,30 @@ class ToolManagerClass {
             this.activePreview.properties.y = Math.min(this.activePreview.startY, y);
             this.activePreview.properties.width = Math.abs(x - this.activePreview.startX);
             this.activePreview.properties.height = Math.abs(y - this.activePreview.startY);
+        } else if (this.activePreview.obj_type === 'image_placement') {
+            const dragWidth = x - this.activePreview.startX;
+            const dragHeight = y - this.activePreview.startY;
+
+            // Preserve aspect ratio based on natural dimensions
+            const naturalW = this.activePreview.properties.naturalWidth;
+            const naturalH = this.activePreview.properties.naturalHeight;
+            const aspect = naturalW / naturalH;
+
+            // Use the largest drag dimension to dictate the bounding box
+            let finalW = Math.abs(dragWidth);
+            let finalH = finalW / aspect;
+            
+            if (Math.abs(dragHeight) > finalH) {
+                finalH = Math.abs(dragHeight);
+                finalW = finalH * aspect;
+            }
+
+            this.activePreview.properties.width = Math.round(finalW);
+            this.activePreview.properties.height = Math.round(finalH);
+            
+            // Allow dragging in any direction
+            this.activePreview.properties.x = dragWidth < 0 ? this.activePreview.startX - Math.round(finalW) : this.activePreview.startX;
+            this.activePreview.properties.y = dragHeight < 0 ? this.activePreview.startY - Math.round(finalH) : this.activePreview.startY;
         }
     }
 
@@ -136,6 +182,43 @@ class ToolManagerClass {
                 return;
             }
             this.activePreview.properties.fill_color = null; // No fill by default in Day 4
+        } else if (this.activePreview.obj_type === 'image_placement') {
+            // If just clicked (width == 0), place at default size (bounded to 400x400)
+            if (this.activePreview.properties.width === 0 || this.activePreview.properties.height === 0) {
+                const maxPlaceDim = 400;
+                let w = this.activePreview.properties.naturalWidth;
+                let h = this.activePreview.properties.naturalHeight;
+                if (w > maxPlaceDim || h > maxPlaceDim) {
+                    const scale = Math.min(maxPlaceDim / w, maxPlaceDim / h);
+                    w = Math.round(w * scale);
+                    h = Math.round(h * scale);
+                }
+                // Center around the click, rounding to prevent backend Pydantic validation errors
+                this.activePreview.properties.x = Math.round(this.activePreview.startX - w / 2);
+                this.activePreview.properties.y = Math.round(this.activePreview.startY - h / 2);
+                this.activePreview.properties.width = Math.round(w);
+                this.activePreview.properties.height = Math.round(h);
+            }
+
+            // Convert to a standard 'image' object for network and renderer
+            this.activePreview.obj_type = 'image';
+            this.activePreview.color = '#000000'; // Must be valid hex to pass Pydantic validation
+            
+            // Fix payload: provide 'image_data' (which backend saves and strips) 
+            // AND keep 'base64' (which bypasses stripping and goes to other clients)
+            this.activePreview.properties.image_data = this.activePreview.properties.base64;
+            
+            // Clean up temporary natural properties
+            delete this.activePreview.properties.naturalWidth;
+            delete this.activePreview.properties.naturalHeight;
+
+            // Reset UX to normal select mode
+            window.AppState.activeTool = 'select';
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            const selectBtn = document.getElementById('tool-select');
+            if(selectBtn) selectBtn.classList.add('active');
+            window.AppState.previewImage = null;
+            document.getElementById('canvas-container').style.cursor = 'default';
         } else {
             // For other tools not yet implemented, just abort
             this.activePreview = null;
@@ -206,6 +289,35 @@ class ToolManagerClass {
      * @param {CanvasRenderingContext2D} ctx 
      */
     renderPreview(ctx) {
+        // Render hover state for image placement (before click)
+        if (!this.isDrawing && window.AppState.activeTool === 'image_placement' && this.hoverPreview && window.AppState.previewImage) {
+            const maxPlaceDim = 400;
+            let w = window.AppState.previewImage.naturalWidth;
+            let h = window.AppState.previewImage.naturalHeight;
+            if (w > maxPlaceDim || h > maxPlaceDim) {
+                const scale = Math.min(maxPlaceDim / w, maxPlaceDim / h);
+                w = Math.round(w * scale);
+                h = Math.round(h * scale);
+            }
+            const px = this.hoverPreview.x - w/2;
+            const py = this.hoverPreview.y - h/2;
+
+            ctx.globalAlpha = 0.5;
+            
+            let img = window.CollabCanvas.imageCache.get('preview_hover');
+            if (!img || img.src !== window.AppState.previewImage.base64) {
+                img = new Image();
+                img.src = window.AppState.previewImage.base64;
+                window.CollabCanvas.imageCache.set('preview_hover', img);
+            }
+            
+            if (img.complete && img.naturalWidth > 0) {
+                ctx.drawImage(img, px, py, w, h);
+            }
+            ctx.globalAlpha = 1.0;
+            return;
+        }
+
         if (!this.isDrawing || !this.activePreview) return;
 
         const { obj_type, color, stroke_width, properties } = this.activePreview;
@@ -228,8 +340,170 @@ class ToolManagerClass {
         else if (obj_type === 'rectangle' && properties.width && properties.height) {
             ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);
         }
+        else if (obj_type === 'image_placement') {
+            if (properties.width > 0 && properties.height > 0) {
+                let img = window.CollabCanvas.imageCache.get('preview_drag');
+                if (!img || img.src !== properties.base64) {
+                    img = new Image();
+                    img.src = properties.base64;
+                    window.CollabCanvas.imageCache.set('preview_drag', img);
+                }
+                if (img.complete && img.naturalWidth > 0) {
+                    ctx.drawImage(img, properties.x, properties.y, properties.width, properties.height);
+                }
+                
+                // Draw a blue bounding box like Figma
+                ctx.strokeStyle = '#0d99ff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);
+            }
+        }
     }
 }
 
 // Export as global
 window.ToolManager = new ToolManagerClass();
+
+// =============================================================================
+// Day 10: Image Upload Handler
+// =============================================================================
+// Handles file selection from the hidden <input type="file">, applies
+// client-side compression if the image exceeds 2MB, reads it as base64,
+// and dispatches it as an optimistic 'image' object.
+// =============================================================================
+
+(function initImageUpload() {
+    const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB limit
+    const MAX_DIMENSION = 1920; // Cap image dimensions to canvas logical size
+    const COMPRESSION_QUALITY = 0.7; // JPEG quality for compression
+
+    const uploadInput = document.getElementById('image-upload-input');
+    if (!uploadInput) return;
+
+    uploadInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Reset the input so the same file can be re-selected
+        uploadInput.value = '';
+
+        // Validate file type
+        if (!file.type.startsWith('image/')) {
+            alert('Please select a valid image file (PNG, JPEG, or WebP).');
+            return;
+        }
+
+        console.log(`[ImageUpload] Selected file: ${file.name} (${(file.size / 1024).toFixed(1)}KB)`);
+
+        try {
+            const base64 = await processImage(file);
+            prepareImagePlacement(base64, file.name);
+        } catch (err) {
+            console.error('[ImageUpload] Failed to process image:', err);
+            alert('Failed to process image. Please try a different file.');
+        }
+    });
+
+    /**
+     * Reads and optionally compresses an image file to stay within 2MB base64.
+     * @param {File} file
+     * @returns {Promise<string>} base64 data URL
+     */
+    function processImage(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('FileReader error'));
+            reader.onload = () => {
+                const dataUrl = reader.result;
+
+                // If the raw file is small enough, use it directly
+                if (file.size <= MAX_FILE_SIZE) {
+                    console.log('[ImageUpload] File within 2MB limit, using original.');
+                    resolve(dataUrl);
+                    return;
+                }
+
+                // File exceeds 2MB — compress via offscreen canvas
+                console.log('[ImageUpload] File exceeds 2MB, compressing...');
+                compressImage(dataUrl).then(resolve).catch(reject);
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    /**
+     * Compresses an image data URL by drawing it to an offscreen canvas
+     * and re-exporting as JPEG at reduced quality/dimensions.
+     * @param {string} dataUrl
+     * @returns {Promise<string>} compressed base64 data URL
+     */
+    function compressImage(dataUrl) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onerror = () => reject(new Error('Image decode error'));
+            img.onload = () => {
+                // Scale down if either dimension exceeds the maximum
+                let { width, height } = img;
+                if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+                    const scale = Math.min(MAX_DIMENSION / width, MAX_DIMENSION / height);
+                    width = Math.round(width * scale);
+                    height = Math.round(height * scale);
+                }
+
+                const offscreen = document.createElement('canvas');
+                offscreen.width = width;
+                offscreen.height = height;
+                const ctx = offscreen.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+
+                // Try JPEG first for maximum compression
+                let compressed = offscreen.toDataURL('image/jpeg', COMPRESSION_QUALITY);
+
+                // If still too large, progressively reduce quality
+                let quality = COMPRESSION_QUALITY;
+                while (compressed.length > MAX_FILE_SIZE * 1.37 && quality > 0.1) {
+                    quality -= 0.1;
+                    compressed = offscreen.toDataURL('image/jpeg', quality);
+                }
+
+                console.log(`[ImageUpload] Compressed to ${(compressed.length / 1024).toFixed(1)}KB (quality=${quality.toFixed(1)})`);
+                resolve(compressed);
+            };
+            img.src = dataUrl;
+        });
+    }
+
+    /**
+     * Prepares the UI and state for the Figma-like placement interaction.
+     * @param {string} base64
+     * @param {string} filename
+     */
+    function prepareImagePlacement(base64, filename) {
+        const img = new Image();
+        img.onload = () => {
+            // Set up global preview state
+            window.AppState = window.AppState || {};
+            window.AppState.previewImage = {
+                base64: base64,
+                naturalWidth: img.naturalWidth,
+                naturalHeight: img.naturalHeight,
+                original_filename: filename
+            };
+
+            // Switch tool mode
+            window.AppState.activeTool = 'image_placement';
+            
+            // Update UI buttons
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            const imageBtn = document.getElementById('tool-image');
+            if (imageBtn) imageBtn.classList.add('active');
+            
+            // Change cursor to crosshair for placement
+            const container = document.getElementById('canvas-container');
+            if (container) container.style.cursor = 'crosshair';
+
+            console.log(`[ImageUpload] Entered placement mode for ${filename}`);
+        };
+        img.src = base64;
+    }
+})();
