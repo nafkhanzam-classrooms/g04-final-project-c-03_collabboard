@@ -43,6 +43,17 @@ const AppState = window.AppState = {
     /** Whether the sidebar is open */
     sidebarOpen: false,
 
+    /** Stroke mode */
+    strokeEnabled: true,
+    strokeColor: '#1a1a2e',
+
+    /** Fill mode */
+    fillEnabled: false,
+    fillColor: '#5b5fc7',
+
+    /** Text mode */
+    fontSize: 24,
+
     // -- Day 2: Network state ------------------------------------------------
 
     /** Display name used for hello handshake */
@@ -92,7 +103,28 @@ const DOM = {
     sidebarToggle: document.getElementById('toolbar-sidebar-toggle'),
     menuBtn: document.getElementById('toolbar-menu-btn'),
     moreBtn: document.getElementById('toolbar-more-btn'),
+    moreOptionsDropdown: document.getElementById('more-options-dropdown'),
+    exportBtn: document.getElementById('menu-export-collab'),
+    importBtn: document.getElementById('menu-import-collab'),
+    importFile: document.getElementById('import-file'),
+    toolShapesBtn: document.getElementById('tool-shapes'),
+    shapesPopover: document.getElementById('shapes-popover'),
+    shapesIcon: document.getElementById('tool-shapes-icon'),
+    strokeToggleBtn: document.getElementById('tool-stroke-toggle'),
+    strokeColorInput: document.getElementById('tool-stroke-color'),
+    strokeColorSwatch: document.getElementById('tool-stroke-swatch'),
+    strokeControls: document.getElementById('stroke-controls'),
+    strokeSeparator: document.getElementById('stroke-separator'),
+    fillToggleBtn: document.getElementById('tool-fill-toggle'),
+    fillColorInput: document.getElementById('tool-fill-color'),
+    fillColorSwatch: document.getElementById('tool-fill-swatch'),
+    fillControls: document.getElementById('fill-controls'),
+    fillSeparator: document.getElementById('fill-separator'),
+    strokeWidthSelect: document.getElementById('tool-stroke-width'),
+    fontSizeSelect: document.getElementById('tool-font-size'),
+    sidebarToggle: document.getElementById('toolbar-sidebar-toggle'),
     participants: document.getElementById('toolbar-participants'),
+    toast: document.getElementById('toast'),
 
     // Sidebar
     sidebar: document.getElementById('sidebar'),
@@ -139,6 +171,36 @@ function setActiveTool(toolName) {
     };
     DOM.canvas.style.cursor = cursorMap[toolName] || 'default';
 
+    // Hide specific UI elements based on tool requirements
+    const noFillTools = ['pencil', 'line', 'arrow', 'text'];
+    const noStrokeToggleTools = ['pencil', 'line', 'arrow', 'text'];
+    const noColorTools = ['select', 'image']; // the user requested cursor tool has no color
+
+    if (noColorTools.includes(toolName)) {
+        if (DOM.strokeControls) DOM.strokeControls.style.display = 'none';
+        if (DOM.strokeSeparator) DOM.strokeSeparator.style.display = 'none';
+        if (DOM.fillControls) DOM.fillControls.style.display = 'none';
+        if (DOM.fillSeparator) DOM.fillSeparator.style.display = 'none';
+        if (DOM.strokeWidthSelect) DOM.strokeWidthSelect.style.display = 'none';
+    } else {
+        if (DOM.strokeControls) DOM.strokeControls.style.display = 'flex';
+        if (DOM.strokeSeparator) DOM.strokeSeparator.style.display = 'block';
+        if (DOM.strokeWidthSelect) {
+            DOM.strokeWidthSelect.style.display = (toolName === 'text') ? 'none' : 'inline-block';
+        }
+        
+        if (DOM.fontSizeSelect) {
+            DOM.fontSizeSelect.style.display = (toolName === 'text') ? 'inline-block' : 'none';
+        }
+        
+        if (DOM.strokeToggleBtn) {
+            DOM.strokeToggleBtn.style.display = noStrokeToggleTools.includes(toolName) ? 'none' : 'flex';
+        }
+
+        if (DOM.fillControls) DOM.fillControls.style.display = noFillTools.includes(toolName) ? 'none' : 'flex';
+        if (DOM.fillSeparator) DOM.fillSeparator.style.display = noFillTools.includes(toolName) ? 'none' : 'block';
+    }
+
     console.log(`[CollabBoard] Active tool: ${toolName}`);
 }
 
@@ -149,24 +211,45 @@ DOM.toolButtons.forEach(btn => {
 });
 
 // ---------------------------------------------------------------------------
-// Color Picker Sync
+// Stroke & Fill Controls
 // ---------------------------------------------------------------------------
-function syncColorSwatch() {
-    const color = DOM.colorInput.value;
-    DOM.colorSwatch.style.background = color;
-    AppState.strokeColor = color;
+
+function syncColors() {
+    DOM.strokeColorSwatch.style.background = DOM.strokeColorInput.value;
+    AppState.strokeColor = DOM.strokeColorInput.value;
+    
+    DOM.fillColorSwatch.style.background = DOM.fillColorInput.value;
+    AppState.fillColor = DOM.fillColorInput.value;
 }
 
-DOM.colorInput.addEventListener('input', syncColorSwatch);
-// Initialize swatch on load
-syncColorSwatch();
+DOM.strokeColorInput.addEventListener('input', syncColors);
+DOM.fillColorInput.addEventListener('input', syncColors);
+
+DOM.strokeToggleBtn.addEventListener('click', () => {
+    AppState.strokeEnabled = !AppState.strokeEnabled;
+    DOM.strokeToggleBtn.classList.toggle('active', AppState.strokeEnabled);
+});
+
+DOM.fillToggleBtn.addEventListener('click', () => {
+    AppState.fillEnabled = !AppState.fillEnabled;
+    DOM.fillToggleBtn.classList.toggle('active', AppState.fillEnabled);
+});
+
+// Initialize on load
+syncColors();
+
 
 // ---------------------------------------------------------------------------
-// Stroke Width
+// Tool Settings
 // ---------------------------------------------------------------------------
 DOM.strokeWidthSelect.addEventListener('change', (e) => {
     AppState.strokeWidth = parseInt(e.target.value, 10);
     console.log(`[CollabBoard] Stroke width: ${AppState.strokeWidth}px`);
+});
+
+DOM.fontSizeSelect.addEventListener('change', (e) => {
+    AppState.fontSize = parseInt(e.target.value, 10);
+    console.log(`[CollabBoard] Font size: ${AppState.fontSize}px`);
 });
 
 // ---------------------------------------------------------------------------
@@ -505,7 +588,7 @@ DOM.canvas.addEventListener('mousemove', (e) => {
 document.addEventListener('keydown', (e) => {
     // -- Day 8: Undo/Redo Bindings --
     if (e.ctrlKey || e.metaKey) {
-        if (e.key.toLowerCase() === 'z') {
+                if (e.key.toLowerCase() === 'z') {
             if (e.shiftKey) {
                 // Ctrl+Shift+Z -> Redo
                 e.preventDefault();
@@ -547,7 +630,6 @@ document.addEventListener('keydown', (e) => {
         'v': 'select',
         'p': 'pencil',
         't': 'text',
-        's': 'rectangle',
         'i': 'image',
     };
 
@@ -555,6 +637,9 @@ document.addEventListener('keydown', (e) => {
     if (tool) {
         e.preventDefault();
         setActiveTool(tool);
+    } else if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        selectActiveShape();
     }
 
     // 'u' toggles sidebar
@@ -671,8 +756,161 @@ network.on('reconnect_failed', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Initialization
+// Toast Notification
 // ---------------------------------------------------------------------------
+function showToast(message, duration = 3000) {
+    DOM.toast.textContent = message;
+    DOM.toast.classList.add('visible');
+    DOM.toast.setAttribute('aria-hidden', 'false');
+    
+    if (DOM.toast._timeout) clearTimeout(DOM.toast._timeout);
+    DOM.toast._timeout = setTimeout(() => {
+        DOM.toast.classList.remove('visible');
+        DOM.toast.setAttribute('aria-hidden', 'true');
+    }, duration);
+}
+
+// ---------------------------------------------------------------------------
+// UI Dropdowns & Popovers
+// ---------------------------------------------------------------------------
+DOM.moreBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isHidden = DOM.moreOptionsDropdown.getAttribute('aria-hidden') === 'true';
+    DOM.moreOptionsDropdown.setAttribute('aria-hidden', !isHidden);
+});
+
+DOM.toolShapesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isHidden = DOM.shapesPopover.getAttribute('aria-hidden') === 'true';
+    DOM.shapesPopover.setAttribute('aria-hidden', !isHidden);
+});
+
+document.querySelectorAll('.popover__item').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        const tool = btn.dataset.tool;
+        setActiveTool(tool);
+        // Update parent icon
+        DOM.shapesIcon.innerHTML = btn.innerHTML;
+        DOM.toolShapesBtn.dataset.tool = tool;
+        DOM.shapesPopover.setAttribute('aria-hidden', 'true');
+    });
+});
+
+document.addEventListener('click', (e) => {
+    if (!DOM.moreOptionsDropdown.contains(e.target) && e.target !== DOM.moreBtn) {
+        DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
+    }
+    if (!DOM.shapesPopover.contains(e.target) && e.target !== DOM.toolShapesBtn) {
+        DOM.shapesPopover.setAttribute('aria-hidden', 'true');
+    }
+});
+
+// Allow 'S' hotkey to select the active shape from the button
+function selectActiveShape() {
+    const tool = DOM.toolShapesBtn.dataset.tool;
+    setActiveTool(tool);
+}
+
+// ---------------------------------------------------------------------------
+// Export / Import .collab
+// ---------------------------------------------------------------------------
+DOM.exportBtn.addEventListener('click', () => {
+    DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
+    if (!window.CollabCanvas) return;
+
+    const objects = Array.from(window.CollabCanvas.objects.values());
+    const payload = {
+        meta: {
+            version: "1.0",
+            exported_at: new Date().toISOString(),
+            room_id: AppState.roomId,
+            object_count: objects.length
+        },
+        objects: objects
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.download = `collabboard_${AppState.roomId || 'local'}_${timestamp}.collab`;
+    a.href = url;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${objects.length} objects successfully.`);
+});
+
+DOM.importBtn.addEventListener('click', () => {
+    DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
+    if (!AppState.roomId) {
+        showToast('Please join a room before importing.');
+        return;
+    }
+    DOM.importFile.click();
+});
+
+DOM.importFile.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+        try {
+            const data = JSON.parse(event.target.result);
+            if (!data.meta || !data.meta.version || !Array.isArray(data.objects)) {
+                throw new Error("Invalid .collab file format.");
+            }
+
+            let count = 0;
+            for (const obj of data.objects) {
+                // Strip server assigned fields
+                const { obj_id, created_by, created_at, seq, ...payload } = obj;
+                
+                // Keep properties clean
+                if (payload.obj_type === 'image' && payload.properties) {
+                    // image_data is not in the export, so imported images will be empty boxes unless we do something else.
+                }
+
+                // Generate temp id and optimistic add
+                const generateUUID = () => {
+                    try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) {}
+                    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                        const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                    });
+                };
+                
+                const tempId = 'temp-' + generateUUID();
+                const optimisticObj = {
+                    ...payload,
+                    obj_id: tempId,
+                    created_by: AppState.userId || 'local',
+                    created_at: new Date().toISOString()
+                };
+
+                window.CollabCanvas.addOptimisticObject(optimisticObj);
+
+                if (window.network && window.network.isIdentified) {
+                    window.network.send({ type: 'op', op: 'add', object: optimisticObj });
+                }
+
+                count++;
+                await new Promise(r => setTimeout(r, 10)); // Rate limit 10ms
+            }
+
+            showToast(`Imported ${count} objects.`);
+        } catch (err) {
+            console.error(err);
+            showToast('Error parsing file.');
+        }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset
+});
+
+// ---------------------------------------------------------------------------
+// UI Initialization
+// ---------------------------------------------------------------------------
+
 (function init() {
     console.log('[CollabBoard] Frontend initialized — Day 2');
     console.log('[CollabBoard] Press Ctrl+Shift+D to toggle dark mode');
