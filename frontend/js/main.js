@@ -93,6 +93,7 @@ const DOM = {
     menuBtn: document.getElementById('toolbar-menu-btn'),
     moreBtn: document.getElementById('toolbar-more-btn'),
     participants: document.getElementById('toolbar-participants'),
+    exportBtn: document.getElementById('toolbar-export-btn'),
 
     // Sidebar
     sidebar: document.getElementById('sidebar'),

@@ -393,6 +393,46 @@ class CanvasRenderer {
                 break;
         }
     }
+
+    /**
+     * Day 9: Export the canvas as a PNG image.
+     * Composites a solid background matching the current container style
+     * before overlaying the transparent drawing canvas.
+     */
+    exportToPNG() {
+        console.log('[CollabCanvas] Exporting to PNG...');
+        
+        // Create an offscreen canvas of the same dimensions
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = this.canvas.width;
+        tempCanvas.height = this.canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+
+        // Capture the current background color from the container
+        const container = document.getElementById('canvas-container');
+        const computedStyle = window.getComputedStyle(container);
+        tempCtx.fillStyle = computedStyle.backgroundColor || '#ffffff';
+        tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+        // Draw the main canvas (which has a transparent background) onto the solid background
+        tempCtx.drawImage(this.canvas, 0, 0);
+
+        // Generate PNG data URL
+        const dataUrl = tempCanvas.toDataURL('image/png');
+
+        // Construct filename: CollabBoard_{RoomID}_{Timestamp}.png
+        const roomId = window.AppState.roomId || 'local';
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `CollabBoard_${roomId}_${timestamp}.png`;
+
+        // Trigger browser download
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
 }
 
 // Export as global
