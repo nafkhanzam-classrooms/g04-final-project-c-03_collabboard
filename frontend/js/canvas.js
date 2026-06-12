@@ -61,6 +61,14 @@ class CanvasRenderer {
         this.tombstones = new Set();
 
         /**
+         * Selection State (Phase 2, Sprint 3)
+         */
+        this.selectedObjectId = null;
+        this.selectedHandle = null;
+        this.isResizing = false;
+        this.resizeStart = null;
+
+        /**
          * Day 10: Cache of HTMLImageElement instances keyed by base64 data hash.
          * Prevents re-creating Image objects every frame in the render loop.
          * @type {Map<string, HTMLImageElement>}
@@ -155,6 +163,11 @@ class CanvasRenderer {
             
             // Remove the object entirely from local state
             this.objects.delete(data.obj_id);
+
+            // Phase 2, Sprint 3: Handle remote delete of selected object
+            if (this.selectedObjectId === data.obj_id) {
+                this.clearSelection();
+            }
         }
     }
 
@@ -219,6 +232,24 @@ class CanvasRenderer {
         }
     }
 
+    // --- Selection Helpers (Phase 2, Sprint 3) ---
+
+    selectObject(objId) { 
+        this.selectedObjectId = objId; 
+    }
+    
+    clearSelection() { 
+        this.selectedObjectId = null; 
+        this.selectedHandle = null; 
+        this.isResizing = false;
+        this.resizeStart = null;
+    }
+    
+    getSelectedObject() { 
+        if (!this.selectedObjectId) return null;
+        return this.objects.get(this.selectedObjectId) || null; 
+    }
+
     /**
      * Core render loop called by requestAnimationFrame.
      */
@@ -243,7 +274,18 @@ class CanvasRenderer {
             }
         }
 
-        // 4. Draw the in-progress tool stroke on top
+        // 4. Draw selection box and handles
+        if (this.selectedObjectId) {
+            const selectedObj = this.objects.get(this.selectedObjectId);
+            if (selectedObj) {
+                this.drawSelection(selectedObj);
+            } else {
+                // Object was deleted remotely
+                this.clearSelection();
+            }
+        }
+
+        // 5. Draw the in-progress tool stroke on top
         if (window.ToolManager) {
             window.ToolManager.renderPreview(this.ctx);
         }
@@ -415,6 +457,50 @@ class CanvasRenderer {
                 console.warn(`[CollabCanvas] Unknown obj_type: ${obj_type}`);
                 break;
         }
+    }
+
+    /**
+     * Phase 2, Sprint 3: Draw selection bounding box and handles.
+     */
+    drawSelection(obj) {
+        if (!window.geometry) return;
+
+        this.ctx.save();
+        
+        // Use an accent color for selection
+        const selectionColor = '#0d99ff'; 
+
+        // Draw bounding box
+        if (obj.obj_type !== 'line' && obj.obj_type !== 'arrow' && obj.obj_type !== 'pencil') {
+            const bbox = window.geometry.getBoundingBox(obj, this.ctx);
+            this.ctx.strokeStyle = selectionColor;
+            this.ctx.lineWidth = 1;
+            this.ctx.setLineDash([4, 4]); // Dashed line
+            this.ctx.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
+        }
+
+        this.ctx.setLineDash([]); // Reset dash for handles
+
+        // Draw resize handles
+        const handles = window.geometry.getHandles(obj, this.ctx);
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.strokeStyle = selectionColor;
+        this.ctx.lineWidth = 1.5;
+        
+        const hs = 5; // 10x10 handle
+
+        for (const h of handles) {
+            this.ctx.beginPath();
+            if (this.ctx.roundRect) {
+                this.ctx.roundRect(h.x - hs, h.y - hs, hs * 2, hs * 2, 2);
+            } else {
+                this.ctx.rect(h.x - hs, h.y - hs, hs * 2, hs * 2);
+            }
+            this.ctx.fill();
+            this.ctx.stroke();
+        }
+
+        this.ctx.restore();
     }
 
     /**

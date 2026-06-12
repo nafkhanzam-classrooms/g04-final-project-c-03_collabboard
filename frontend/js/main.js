@@ -152,6 +152,10 @@ const DOM = {
 function setActiveTool(toolName) {
     AppState.activeTool = toolName;
 
+    if (toolName !== 'select' && window.CollabCanvas) {
+        window.CollabCanvas.clearSelection();
+    }
+
     DOM.toolButtons.forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tool === toolName);
     });
@@ -219,25 +223,124 @@ DOM.toolButtons.forEach(btn => {
 // Stroke & Fill Controls
 // ---------------------------------------------------------------------------
 
-function syncColors() {
+function syncColors(changedType) {
     DOM.strokeColorSwatch.style.background = DOM.strokeColorInput.value;
     AppState.strokeColor = DOM.strokeColorInput.value;
     
     DOM.fillColorSwatch.style.background = DOM.fillColorInput.value;
     AppState.fillColor = DOM.fillColorInput.value;
+
+    // Phase 2, Sprint 3: Live update selected object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && changedType) {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const changes = {};
+
+            if (changedType === 'stroke') {
+                changes.color = AppState.strokeColor;
+                selectedObj.color = AppState.strokeColor;
+            } else if (changedType === 'fill') {
+                changes.properties = { ...selectedObj.properties, fill_color: AppState.fillColor };
+                selectedObj.properties.fill_color = AppState.fillColor;
+            }
+
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: changes
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: changes,
+                        old_values: changedType === 'stroke' 
+                            ? { color: oldSnapshot.color }
+                            : { properties: { fill_color: oldSnapshot.properties.fill_color } }
+                    });
+                }
+            }
+        }
+    }
 }
 
-DOM.strokeColorInput.addEventListener('input', syncColors);
-DOM.fillColorInput.addEventListener('input', syncColors);
+DOM.strokeColorInput.addEventListener('input', () => syncColors('stroke'));
+DOM.fillColorInput.addEventListener('input', () => syncColors('fill'));
 
 DOM.strokeToggleBtn.addEventListener('click', () => {
     AppState.strokeEnabled = !AppState.strokeEnabled;
     DOM.strokeToggleBtn.classList.toggle('active', AppState.strokeEnabled);
+
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && selectedObj.obj_type !== 'text' && selectedObj.obj_type !== 'image') {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const newStrokeWidth = AppState.strokeEnabled ? AppState.strokeWidth : 0;
+            
+            selectedObj.stroke_width = newStrokeWidth;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { stroke_width: newStrokeWidth }
+                };
+                window.network.send(modifyOp);
+                
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { stroke_width: newStrokeWidth },
+                        old_values: { stroke_width: oldSnapshot.stroke_width }
+                    });
+                }
+            }
+        }
+    }
 });
 
 DOM.fillToggleBtn.addEventListener('click', () => {
     AppState.fillEnabled = !AppState.fillEnabled;
     DOM.fillToggleBtn.classList.toggle('active', AppState.fillEnabled);
+
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && ['rectangle', 'circle', 'heart'].includes(selectedObj.obj_type)) {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const newFillColor = AppState.fillEnabled ? AppState.fillColor : null;
+            
+            selectedObj.properties.fill_color = newFillColor;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { properties: selectedObj.properties }
+                };
+                window.network.send(modifyOp);
+                
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { properties: selectedObj.properties },
+                        old_values: { properties: oldSnapshot.properties }
+                    });
+                }
+            }
+        }
+    }
 });
 
 // Initialize on load
@@ -250,11 +353,69 @@ syncColors();
 DOM.strokeWidthSelect.addEventListener('change', (e) => {
     AppState.strokeWidth = parseInt(e.target.value, 10);
     console.log(`[CollabBoard] Stroke width: ${AppState.strokeWidth}px`);
+
+    // Phase 2, Sprint 3: Update selected object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj) {
+            const oldWidth = selectedObj.stroke_width;
+            selectedObj.stroke_width = AppState.strokeWidth;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { stroke_width: AppState.strokeWidth }
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { stroke_width: AppState.strokeWidth },
+                        old_values: { stroke_width: oldWidth }
+                    });
+                }
+            }
+        }
+    }
 });
 
 DOM.fontSizeSelect.addEventListener('change', (e) => {
     AppState.fontSize = parseInt(e.target.value, 10);
     console.log(`[CollabBoard] Font size: ${AppState.fontSize}px`);
+
+    // Phase 2, Sprint 3: Update selected text object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && selectedObj.obj_type === 'text') {
+            const oldSize = selectedObj.properties.font_size;
+            selectedObj.properties.font_size = AppState.fontSize;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { properties: { font_size: AppState.fontSize } }
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { properties: { font_size: AppState.fontSize } },
+                        old_values: { properties: { font_size: oldSize } }
+                    });
+                }
+            }
+        }
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -651,6 +812,40 @@ document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'u') {
         e.preventDefault();
         toggleSidebar();
+    }
+
+    // -- Phase 2, Sprint 3: Delete Object --
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+            e.preventDefault();
+            const selectedObj = window.CollabCanvas.getSelectedObject();
+            if (selectedObj) {
+                const snapshot = JSON.parse(JSON.stringify(selectedObj));
+                const objId = selectedObj.obj_id;
+
+                // Send delete operation
+                if (window.network && window.network.isIdentified) {
+                    const deleteOp = {
+                        type: 'op',
+                        op: 'delete',
+                        obj_id: objId
+                    };
+                    window.network.send(deleteOp);
+
+                    if (window.UndoRedoManager) {
+                        window.UndoRedoManager.pushAction({
+                            type: 'op',
+                            op: 'add',
+                            object: snapshot
+                        });
+                    }
+                }
+
+                // Remove optimistically and clear selection
+                window.CollabCanvas.removeOptimisticObject(objId);
+                window.CollabCanvas.clearSelection();
+            }
+        }
     }
 });
 
