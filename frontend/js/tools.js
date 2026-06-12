@@ -205,7 +205,7 @@ class ToolManagerClass {
                 this.activePreview = null;
                 return;
             }
-            this.activePreview.properties.fill_color = null; // No fill by default in Day 4
+            this.activePreview.properties.fill_color = window.AppState.fillEnabled ? window.AppState.fillColor : null;
         } else if (this.activePreview.obj_type === 'image_placement') {
             // If just clicked (width == 0), place at default size (bounded to 400x400)
             if (this.activePreview.properties.width === 0 || this.activePreview.properties.height === 0) {
