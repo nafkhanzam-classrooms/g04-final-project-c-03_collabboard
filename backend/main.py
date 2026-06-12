@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI):
 
     pubsub_task: asyncio.Task | None = None
     autosave_task: asyncio.Task | None = None
+    cleanup_task: asyncio.Task | None = None
 
     # -- Startup --------------------------------------------------------------
     print(f"[{SERVER_ID}] CollabBoard backend starting...")
@@ -169,10 +170,19 @@ async def lifespan(app: FastAPI):
     # Runs every 60s, protected by the Redis lock:autosave distributed lock.
     # Only one backend instance will execute the autosave per cycle.
     try:
+        from backend.tasks import start_autosave_loop
         autosave_task = start_autosave_loop(server_id=SERVER_ID)
         print(f"[{SERVER_ID}] Autosave background task started (60s interval)")
     except Exception as exc:
         print(f"[{SERVER_ID}] WARNING: Failed to start autosave task: {exc}")
+
+    # Start cleanup background task (M3, Day 10)
+    try:
+        from backend.tasks import start_cleanup_loop
+        cleanup_task = start_cleanup_loop(server_id=SERVER_ID)
+        print(f"[{SERVER_ID}] Cleanup background task started (6h interval)")
+    except Exception as exc:
+        print(f"[{SERVER_ID}] WARNING: Failed to start cleanup task: {exc}")
 
     yield  # Application is running
 
@@ -187,6 +197,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         print(f"[{SERVER_ID}] Autosave background task stopped")
+
+    if cleanup_task is not None and not cleanup_task.done():
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        print(f"[{SERVER_ID}] Cleanup background task stopped")
 
     # Cancel pub/sub subscriber task (M1, Day 5)
     if pubsub_task is not None and not pubsub_task.done():
