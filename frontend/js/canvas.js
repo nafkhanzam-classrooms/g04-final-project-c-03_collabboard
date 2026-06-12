@@ -353,10 +353,6 @@ class CanvasRenderer {
                 this.ctx.closePath();
                 if (properties.fill_color) {
                     this.ctx.fill();
-                } else {
-                    // Hearts look better filled with the stroke color by default
-                    this.ctx.fillStyle = color;
-                    this.ctx.fill();
                 }
                 if (stroke_width > 0) {
                     this.ctx.stroke();
@@ -369,7 +365,15 @@ class CanvasRenderer {
                 this.ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
                 this.ctx.fillStyle = color;
                 this.ctx.textBaseline = 'top';
-                this.ctx.fillText(properties.content || '', properties.x, properties.y);
+                
+                const textContent = properties.content || '';
+                const lines = textContent.split('\n');
+                const lineHeight = fontSize * 1.2;
+                
+                for (let i = 0; i < lines.length; i++) {
+                    this.ctx.fillText(lines[i], properties.x, properties.y + (i * lineHeight));
+                }
+                
                 // Text is not stroked by default
                 break;
             }
