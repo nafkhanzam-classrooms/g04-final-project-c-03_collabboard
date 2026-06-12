@@ -60,6 +60,13 @@ class CanvasRenderer {
          */
         this.tombstones = new Set();
 
+        /**
+         * Day 10: Cache of HTMLImageElement instances keyed by base64 data hash.
+         * Prevents re-creating Image objects every frame in the render loop.
+         * @type {Map<string, HTMLImageElement>}
+         */
+        this.imageCache = new Map();
+
         // Bind the render loop to this instance
         this.renderLoop = this.renderLoop.bind(this);
     }
@@ -372,9 +379,21 @@ class CanvasRenderer {
             }
 
             case 'image':
-                // Image rendering is a Day 10 task (requires HTMLImageElement cache)
-                // For now, draw a placeholder rectangle with a label
-                if (properties.width && properties.height) {
+                if (properties.base64 && properties.width && properties.height) {
+                    // Use a short hash of the base64 string as cache key
+                    const cacheKey = properties.base64.substring(0, 64) + '_' + properties.base64.length;
+                    let img = this.imageCache.get(cacheKey);
+                    if (!img) {
+                        img = new Image();
+                        img.src = properties.base64;
+                        this.imageCache.set(cacheKey, img);
+                    }
+                    // Only draw once the image has fully decoded
+                    if (img.complete && img.naturalWidth > 0) {
+                        this.ctx.drawImage(img, properties.x, properties.y, properties.width, properties.height);
+                    }
+                } else if (properties.width && properties.height) {
+                    // Fallback placeholder if no base64 data (legacy objects)
                     this.ctx.strokeStyle = '#888';
                     this.ctx.setLineDash([6, 4]);
                     this.ctx.strokeRect(properties.x, properties.y, properties.width, properties.height);
@@ -396,6 +415,46 @@ class CanvasRenderer {
                 console.warn(`[CollabCanvas] Unknown obj_type: ${obj_type}`);
                 break;
         }
+    }
+
+    /**
+     * Day 9: Export the canvas as a PNG image.
+     * Composites a solid background matching the current container style
+     * before overlaying the transparent drawing canvas.
+     */
+    exportToPNG() {
+        console.log('[CollabCanvas] Exporting to PNG...');
+        
+        // Create an offscreen canvas of the same dimensions
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = this.canvas.width;
+        tempCanvas.height = this.canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+
+        // Capture the current background color from the container
+        const container = document.getElementById('canvas-container');
+        const computedStyle = window.getComputedStyle(container);
+        tempCtx.fillStyle = computedStyle.backgroundColor || '#ffffff';
+        tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+        // Draw the main canvas (which has a transparent background) onto the solid background
+        tempCtx.drawImage(this.canvas, 0, 0);
+
+        // Generate PNG data URL
+        const dataUrl = tempCanvas.toDataURL('image/png');
+
+        // Construct filename: CollabBoard_{RoomID}_{Timestamp}.png
+        const roomId = window.AppState.roomId || 'local';
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `CollabBoard_${roomId}_${timestamp}.png`;
+
+        // Trigger browser download
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     }
 }
 

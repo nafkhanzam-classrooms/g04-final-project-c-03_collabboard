@@ -217,4 +217,12 @@
         _renderParticipants();
     });
 
+    if (DOM.exportBtn) {
+        DOM.exportBtn.addEventListener('click', () => {
+            if (window.CollabCanvas) {
+                window.CollabCanvas.exportToPNG();
+            }
+        });
+    }
+
 })();

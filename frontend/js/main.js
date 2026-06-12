@@ -124,6 +124,7 @@ const DOM = {
     fontSizeSelect: document.getElementById('tool-font-size'),
     sidebarToggle: document.getElementById('toolbar-sidebar-toggle'),
     participants: document.getElementById('toolbar-participants'),
+    exportBtn: document.getElementById('toolbar-export-btn'),
     toast: document.getElementById('toast'),
 
     // Sidebar
@@ -206,7 +207,13 @@ function setActiveTool(toolName) {
 
 DOM.toolButtons.forEach(btn => {
     btn.addEventListener('click', () => {
-        setActiveTool(btn.dataset.tool);
+        const tool = btn.dataset.tool;
+        if (tool === 'image') {
+            const uploadInput = document.getElementById('image-upload-input');
+            if (uploadInput) uploadInput.click();
+            return;
+        }
+        setActiveTool(tool);
     });
 });
 
