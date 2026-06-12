@@ -1113,7 +1113,78 @@ async def save_canvas_snapshot(
             )
 
             # Verify the room existed
-            if result == "UPDATE 0":
-                return None
-
     return str(save_row["save_id"])
+
+
+# =========================================================================
+# Image helpers (Day 10, M3)
+# =========================================================================
+
+async def insert_image(
+    image_id: str,
+    room_id: str,
+    obj_id: str,
+    filename: str,
+    mime_type: str,
+    file_size: int,
+) -> None:
+    """
+    Insert an image metadata record into the `images` table.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO images
+                (image_id, room_id, obj_id, filename, mime_type, file_size)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """,
+            _uuid.UUID(image_id),
+            room_id,
+            _uuid.UUID(obj_id),
+            filename,
+            mime_type,
+            file_size,
+        )
+
+# =========================================================================
+# Cleanup helpers (Day 10, M3)
+# =========================================================================
+
+async def delete_stale_rooms() -> List[str]:
+    """
+    Delete rooms inactive for > 30 days and return their room_ids.
+    Used by the cleanup_loop.
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            DELETE FROM rooms
+            WHERE last_activity < now() - INTERVAL '30 days'
+            RETURNING room_id
+            """
+        )
+    return [row["room_id"] for row in rows]
+
+async def update_room_status(room_id: str, status: str) -> None:
+    """
+    Update the status of a room (e.g., 'active', 'empty').
+    """
+    if pool is None:
+        raise RuntimeError("Database pool is not initialized")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE rooms
+            SET status = $2
+            WHERE room_id = $1
+            """,
+            room_id,
+            status,
+        )

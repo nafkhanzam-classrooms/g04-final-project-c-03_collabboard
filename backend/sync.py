@@ -38,6 +38,10 @@ Exposes:
 from __future__ import annotations
 
 from pydantic import ValidationError
+import base64
+import os
+import uuid
+from pathlib import Path
 
 from backend import db
 from backend.models import AddObjectPayload, ModifyChangesPayload
@@ -162,6 +166,52 @@ async def _handle_add(
                 return _rejected("invalid_object_type")
         return _rejected("invalid_properties")
 
+    # --- Step 2.5: Image validation and storage (Day 10) ---------------------
+    image_meta = None
+    if payload.obj_type == "image":
+        image_data_b64 = payload.properties.get("image_data", "")
+        original_filename = payload.properties.get("original_filename", "image.png")
+        
+        try:
+            if "," in image_data_b64:
+                image_data_b64 = image_data_b64.split(",", 1)[1]
+            decoded_bytes = base64.b64decode(image_data_b64)
+        except Exception as exc:
+            print(f"[sync] ERROR: base64 decode failed: {exc}")
+            return _rejected("invalid_properties")
+            
+        file_size = len(decoded_bytes)
+        if file_size > 2097152:
+            return _rejected("image_too_large")
+            
+        image_id = str(uuid.uuid4())
+        ext = ".png" if original_filename.lower().endswith(".png") else ".jpg"
+        mime_type = "image/png" if ext == ".png" else "image/jpeg"
+        filename = f"{image_id}{ext}"
+        
+        project_root = Path(__file__).resolve().parent.parent
+        images_dir = project_root / "data" / "canvases" / room_id / "images"
+        os.makedirs(images_dir, exist_ok=True)
+        
+        image_path = images_dir / filename
+        try:
+            with open(image_path, "wb") as f:
+                f.write(decoded_bytes)
+        except Exception as exc:
+            print(f"[sync] ERROR: Failed to write image to disk: {exc}")
+            return _rejected("invalid_properties")
+
+        # Strip base64 data from properties before saving to DB
+        payload.properties.pop("image_data", None)
+        payload.properties["image_id"] = image_id
+        
+        image_meta = {
+            "image_id": image_id,
+            "filename": filename,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        }
+
     # --- Step 3: Write to PostgreSQL -----------------------------------------
     try:
         seq, obj_id, created_at = await db.insert_canvas_object(
@@ -176,6 +226,20 @@ async def _handle_add(
     except Exception as exc:
         print(f"[sync] ERROR: insert_canvas_object failed: {exc}")
         return _rejected("invalid_properties")
+
+    # Day 10 M3: Insert image metadata
+    if image_meta:
+        try:
+            await db.insert_image(
+                image_id=image_meta["image_id"],
+                room_id=room_id,
+                obj_id=obj_id,
+                filename=image_meta["filename"],
+                mime_type=image_meta["mime_type"],
+                file_size=image_meta["file_size"],
+            )
+        except Exception as exc:
+            print(f"[sync] ERROR: insert_image failed: {exc}")
 
     # --- Step 4: Build response dicts ----------------------------------------
     op_ack = {

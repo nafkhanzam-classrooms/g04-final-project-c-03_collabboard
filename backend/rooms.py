@@ -48,11 +48,14 @@ import json
 import secrets
 import string
 
+import asyncio
 from fastapi import WebSocket
 
 from backend.connection import ConnectionManager, ClientState, SessionState
 from backend import db
 from backend import redis_client
+
+_eviction_timers: dict[str, asyncio.Task] = {}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -315,6 +318,17 @@ async def handle_join_room(
     # handle_disconnect_cleanup if the connection dies during sends below.
     manager.add_to_room(room_id, client.user_id)
 
+    # Cancel eviction timer if it exists (Day 10, M3)
+    if room_id in _eviction_timers:
+        _eviction_timers[room_id].cancel()
+        del _eviction_timers[room_id]
+        print(f"[rooms] Cancelled eviction timer for {room_id} (user joined)")
+        # Make sure room status is active
+        try:
+            await db.update_room_status(room_id, "active")
+        except Exception:
+            pass
+
     # --- Responses -----------------------------------------------------------
 
     # Build member list for join_ack
@@ -489,6 +503,16 @@ async def handle_leave_room(
         f"← room {room_id}"
     )
 
+    # Day 10, M3: Start 5-min eviction timer if room is empty globally
+    try:
+        members = await db.get_room_members(room_id)
+        if len(members) == 0:
+            if room_id not in _eviction_timers:
+                _eviction_timers[room_id] = asyncio.create_task(_evict_room_after_delay(room_id))
+                print(f"[rooms] Started 5-minute eviction timer for {room_id}")
+    except Exception as exc:
+        print(f"[rooms] WARNING: Failed to check room members for eviction: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # Disconnect Cleanup
@@ -602,3 +626,29 @@ async def handle_disconnect_cleanup(
         f"[rooms] Disconnect cleanup: {client.username} ({client.user_id}) "
         f"← room {room_id}"
     )
+
+    # Day 10, M3: Start 5-min eviction timer if room is empty globally
+    try:
+        members = await db.get_room_members(room_id)
+        if len(members) == 0:
+            if room_id not in _eviction_timers:
+                _eviction_timers[room_id] = asyncio.create_task(_evict_room_after_delay(room_id))
+                print(f"[rooms] Started 5-minute eviction timer for {room_id}")
+    except Exception as exc:
+        print(f"[rooms] WARNING: Failed to check room members for eviction: {exc}")
+
+async def _evict_room_after_delay(room_id: str) -> None:
+    """Evict room after 5 minutes if it remains empty."""
+    try:
+        await asyncio.sleep(300)
+        # Verify it's still empty
+        members = await db.get_room_members(room_id)
+        if len(members) == 0:
+            await db.update_room_status(room_id, "empty")
+            print(f"[rooms] Room {room_id} has been idle for 5 mins. Status set to empty.")
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[rooms] ERROR in eviction timer for {room_id}: {exc}")
+    finally:
+        _eviction_timers.pop(room_id, None)

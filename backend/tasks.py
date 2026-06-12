@@ -323,3 +323,74 @@ def start_autosave_loop(server_id: str) -> asyncio.Task:
         name=f"autosave_loop_{server_id}",
     )
     return task
+
+# ---------------------------------------------------------------------------
+# Cleanup Loop (Day 10)
+# ---------------------------------------------------------------------------
+
+CLEANUP_INTERVAL_SECONDS: int = 21600
+CLEANUP_LOCK_KEY: str = "lock:cleanup"
+CLEANUP_LOCK_TTL_SECONDS: int = 21600
+
+import shutil
+from pathlib import Path
+
+async def cleanup_loop(server_id: str) -> None:
+    print(f"[{server_id}] [cleanup] Background task started (interval={CLEANUP_INTERVAL_SECONDS}s)")
+    
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+        try:
+            await _run_cleanup_cycle(server_id)
+        except asyncio.CancelledError:
+            print(f"[{server_id}] [cleanup] Background task cancelled")
+            raise
+        except Exception as exc:
+            print(f"[{server_id}] [cleanup] ERROR: Cycle failed — {type(exc).__name__}: {exc}")
+
+async def _run_cleanup_cycle(server_id: str) -> None:
+    if redis_client.redis_conn is None:
+        return
+        
+    try:
+        lock_acquired = await redis_client.redis_conn.set(
+            CLEANUP_LOCK_KEY,
+            server_id,
+            nx=True,
+            ex=CLEANUP_LOCK_TTL_SECONDS,
+        )
+    except Exception as exc:
+        print(f"[{server_id}] [cleanup] ERROR: Failed to acquire lock: {exc}")
+        return
+        
+    if not lock_acquired:
+        return
+        
+    print(f"[{server_id}] [cleanup] Lock acquired — deleting stale rooms")
+    
+    try:
+        deleted_rooms = await db.delete_stale_rooms()
+    except Exception as exc:
+        print(f"[{server_id}] [cleanup] ERROR: Failed to delete stale rooms: {exc}")
+        return
+        
+    if not deleted_rooms:
+        return
+        
+    print(f"[{server_id}] [cleanup] Deleted {len(deleted_rooms)} stale room(s). Cleaning up disk...")
+    
+    project_root = Path(__file__).resolve().parent.parent
+    for room_id in deleted_rooms:
+        room_dir = project_root / "data" / "canvases" / room_id
+        if room_dir.exists():
+            try:
+                shutil.rmtree(room_dir)
+            except Exception as exc:
+                print(f"[{server_id}] [cleanup] ERROR: Failed to rmtree {room_id}: {exc}")
+
+def start_cleanup_loop(server_id: str) -> asyncio.Task:
+    task = asyncio.create_task(
+        cleanup_loop(server_id),
+        name=f"cleanup_loop_{server_id}",
+    )
+    return task
