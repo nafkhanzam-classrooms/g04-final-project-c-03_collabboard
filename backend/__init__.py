@@ -9,6 +9,6 @@ Modules:
     sync        – SyncEngine: op dispatch, PostgreSQL write, Redis publish
     pubsub      – Redis Subscriber: listens to room channels, relays to local WS
     db          – Database: asyncpg pool setup, CRUD operations
-    tasks       – Background Tasks: autosave, 30-day cleanup via Redis locks
+    tasks       – Background Tasks: autosave, 24-hour cleanup via Redis locks
     models      – Pydantic models for request/message validation
 """

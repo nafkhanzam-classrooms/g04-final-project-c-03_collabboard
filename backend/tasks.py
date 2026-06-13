@@ -38,7 +38,7 @@ Exposes:
 
 Day 10 TODO:
     - cleanup_loop: every 6h, SET lock:cleanup NX EX 21600,
-      delete 30-day stale rooms
+      delete 24-hour stale rooms
 """
 
 from __future__ import annotations
