@@ -94,6 +94,8 @@ RELAYABLE_TYPES: frozenset[str] = frozenset({
     "cursor_update",
     "cursor_chat_broadcast",
     "selection_update",
+    "stream_points",
+    "stream_end",
 })
 
 

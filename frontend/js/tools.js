@@ -24,6 +24,9 @@ class ToolManagerClass {
         this.activePreview = null;
         this.hoverPreview = null;
 
+        // Phase 2, Sprint 5: Stroke Streaming throttle
+        this._lastStreamTime = 0;
+
         // Bind event handlers
         this.onMouseDown = this.onMouseDown.bind(this);
         this.onMouseMove = this.onMouseMove.bind(this);
@@ -93,6 +96,7 @@ class ToolManagerClass {
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points = [[x, y]];
+            this._lastStreamTime = performance.now();
         } else if (this.activePreview.obj_type === 'image_placement') {
             this.activePreview.properties.x = x;
             this.activePreview.properties.y = y;
@@ -134,6 +138,21 @@ class ToolManagerClass {
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points.push([x, y]);
+            
+            // Phase 2, Sprint 5: Stream Points
+            const now = performance.now();
+            if (now - this._lastStreamTime >= 30) {
+                this._lastStreamTime = now;
+                if (window.network && window.network.isIdentified) {
+                    window.network.send({
+                        type: 'stream_points',
+                        obj_type: 'pencil',
+                        color: this.activePreview.color,
+                        stroke_width: this.activePreview.stroke_width,
+                        points: this.activePreview.properties.points
+                    });
+                }
+            }
         } else if (this.activePreview.obj_type === 'rectangle') {
             // Calculate width and height (can be negative during drag, so we normalize later or draw as is)
             this.activePreview.properties.x = Math.min(this.activePreview.startX, x);
@@ -169,7 +188,7 @@ class ToolManagerClass {
             const dy = y - this.activePreview.startY;
             this.activePreview.properties.cx = this.activePreview.startX;
             this.activePreview.properties.cy = this.activePreview.startY;
-            this.activePreview.properties.radius = Math.sqrt(dx * dx + dy * dy);
+            this.activePreview.properties.radius = Math.round(Math.sqrt(dx * dx + dy * dy));
         } else if (this.activePreview.obj_type === 'line' || this.activePreview.obj_type === 'arrow') {
             this.activePreview.properties.x1 = this.activePreview.startX;
             this.activePreview.properties.y1 = this.activePreview.startY;
@@ -180,7 +199,7 @@ class ToolManagerClass {
             const dy = y - this.activePreview.startY;
             this.activePreview.properties.cx = this.activePreview.startX;
             this.activePreview.properties.cy = this.activePreview.startY;
-            this.activePreview.properties.size = Math.sqrt(dx * dx + dy * dy);
+            this.activePreview.properties.size = Math.round(Math.sqrt(dx * dx + dy * dy));
         }
     }
 
@@ -263,51 +282,8 @@ class ToolManagerClass {
                     snapshot: JSON.parse(JSON.stringify(obj))
                 };
 
-                // Sync UI state
-                const strokeColorInput = document.getElementById('tool-stroke-color');
-                const fillColorInput = document.getElementById('tool-fill-color');
-                const strokeWidthInput = document.getElementById('tool-stroke-width');
-                const fillToggleBtn = document.getElementById('tool-fill-toggle');
-                const strokeToggleBtn = document.getElementById('tool-stroke-toggle');
-                
-                if (strokeColorInput && obj.color) {
-                    strokeColorInput.value = obj.color;
-                    window.AppState.strokeColor = obj.color;
-                    const strokeColorSwatch = document.getElementById('tool-stroke-swatch');
-                    if (strokeColorSwatch) strokeColorSwatch.style.background = obj.color;
-                }
-                
-                if (fillColorInput && obj.properties.fill_color) {
-                    fillColorInput.value = obj.properties.fill_color;
-                    window.AppState.fillColor = obj.properties.fill_color;
-                    const fillColorSwatch = document.getElementById('tool-fill-swatch');
-                    if (fillColorSwatch) fillColorSwatch.style.background = obj.properties.fill_color;
-                }
-                
-                if (strokeWidthInput && obj.stroke_width !== undefined) {
-                    strokeWidthInput.value = obj.stroke_width === 0 ? window.AppState.strokeWidth : obj.stroke_width;
-                    if (obj.stroke_width > 0) window.AppState.strokeWidth = obj.stroke_width;
-                }
-                
-                if (obj.obj_type === 'text') {
-                    const fontSizeInput = document.getElementById('tool-font-size');
-                    if (fontSizeInput && obj.properties.font_size) {
-                        fontSizeInput.value = obj.properties.font_size;
-                        window.AppState.fontSize = obj.properties.font_size;
-                    }
-                }
-
-                if (fillToggleBtn) {
-                    const hasFill = !!obj.properties.fill_color;
-                    window.AppState.fillEnabled = hasFill;
-                    fillToggleBtn.classList.toggle('active', hasFill);
-                }
-                
-                if (strokeToggleBtn) {
-                    const hasStroke = obj.stroke_width > 0;
-                    window.AppState.strokeEnabled = hasStroke;
-                    strokeToggleBtn.classList.toggle('active', hasStroke);
-                }
+                // Sync UI state using helper
+                this._syncUIForObject(obj);
 
                 break;
             }
@@ -315,6 +291,11 @@ class ToolManagerClass {
 
         if (!foundHit) {
             canvasRenderer.clearSelection();
+            
+            // Reset UI visibility to default for the active tool
+            if (typeof setActiveTool === 'function' && window.AppState) {
+                setActiveTool(window.AppState.activeTool);
+            }
         }
     }
 
@@ -410,6 +391,93 @@ class ToolManagerClass {
         }
     }
 
+    _syncUIForObject(obj) {
+        const strokeColorInput = document.getElementById('tool-stroke-color');
+        const fillColorInput = document.getElementById('tool-fill-color');
+        const strokeWidthInput = document.getElementById('tool-stroke-width');
+        const fillToggleBtn = document.getElementById('tool-fill-toggle');
+        const strokeToggleBtn = document.getElementById('tool-stroke-toggle');
+        
+        const strokeControls = document.getElementById('stroke-controls');
+        const strokeSeparator = document.getElementById('stroke-separator');
+        const fillControls = document.getElementById('fill-controls');
+        const fillSeparator = document.getElementById('fill-separator');
+
+        if (obj.obj_type === 'image') {
+            if (strokeControls) strokeControls.style.display = 'none';
+            if (strokeSeparator) strokeSeparator.style.display = 'none';
+            if (fillControls) fillControls.style.display = 'none';
+            if (fillSeparator) fillSeparator.style.display = 'none';
+            if (strokeWidthInput) strokeWidthInput.style.display = 'none';
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput) fontSizeInput.style.display = 'none';
+            return;
+        } else {
+            if (strokeControls) strokeControls.style.display = 'flex';
+            if (strokeSeparator) strokeSeparator.style.display = 'block';
+        }
+
+        if (strokeColorInput && obj.color) {
+            strokeColorInput.value = obj.color;
+            window.AppState.strokeColor = obj.color;
+            const strokeColorSwatch = document.getElementById('tool-stroke-swatch');
+            if (strokeColorSwatch) strokeColorSwatch.style.background = obj.color;
+        }
+        
+        if (fillColorInput && obj.properties.fill_color) {
+            fillColorInput.value = obj.properties.fill_color;
+            window.AppState.fillColor = obj.properties.fill_color;
+            const fillColorSwatch = document.getElementById('tool-fill-swatch');
+            if (fillColorSwatch) fillColorSwatch.style.background = obj.properties.fill_color;
+        }
+        
+        if (strokeWidthInput && obj.stroke_width !== undefined) {
+            strokeWidthInput.value = obj.stroke_width === 0 ? window.AppState.strokeWidth : obj.stroke_width;
+            if (obj.stroke_width > 0) window.AppState.strokeWidth = obj.stroke_width;
+        }
+        
+        if (obj.obj_type === 'text') {
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput && obj.properties.font_size) {
+                fontSizeInput.style.display = 'inline-block';
+                fontSizeInput.value = obj.properties.font_size;
+                window.AppState.fontSize = obj.properties.font_size;
+            }
+            if (strokeWidthInput) strokeWidthInput.style.display = 'none';
+        } else {
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput) fontSizeInput.style.display = 'none';
+            if (strokeWidthInput) strokeWidthInput.style.display = 'inline-block';
+        }
+
+        const noFillTools = ['pencil', 'line', 'arrow', 'text'];
+
+        if (noFillTools.includes(obj.obj_type)) {
+            if (fillControls) fillControls.style.display = 'none';
+            if (fillSeparator) fillSeparator.style.display = 'none';
+        } else {
+            if (fillControls) fillControls.style.display = 'flex';
+            if (fillSeparator) fillSeparator.style.display = 'block';
+            if (fillToggleBtn) {
+                const hasFill = !!obj.properties.fill_color;
+                window.AppState.fillEnabled = hasFill;
+                fillToggleBtn.classList.toggle('active', hasFill);
+            }
+        }
+        
+        const noStrokeToggleTools = ['pencil', 'line', 'arrow', 'text'];
+        if (noStrokeToggleTools.includes(obj.obj_type)) {
+            if (strokeToggleBtn) strokeToggleBtn.style.display = 'none';
+        } else {
+            if (strokeToggleBtn) {
+                strokeToggleBtn.style.display = 'flex';
+                const hasStroke = obj.stroke_width > 0;
+                window.AppState.strokeEnabled = hasStroke;
+                strokeToggleBtn.classList.toggle('active', hasStroke);
+            }
+        }
+    }
+
     /**
      * Finalizes the current preview stroke, constructs the payload,
      * optimistically adds it to the local canvas, and sends it over the network.
@@ -459,13 +527,7 @@ class ToolManagerClass {
             delete this.activePreview.properties.naturalWidth;
             delete this.activePreview.properties.naturalHeight;
 
-            // Reset UX to normal select mode
-            window.AppState.activeTool = 'select';
-            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-            const selectBtn = document.getElementById('tool-select');
-            if(selectBtn) selectBtn.classList.add('active');
             window.AppState.previewImage = null;
-            document.getElementById('canvas-container').style.cursor = 'default';
             this.activePreview.properties.fill_color = window.AppState.fillEnabled ? window.AppState.fillColor : null;
         } else if (this.activePreview.obj_type === 'circle') {
             if (!this.activePreview.properties.radius || this.activePreview.properties.radius < 2) {
@@ -531,6 +593,11 @@ class ToolManagerClass {
 
         // 2. Network Send
         if (window.network && window.network.isIdentified) {
+            // Phase 2, Sprint 5: Stream End
+            if (this.activePreview.obj_type === 'pencil') {
+                window.network.send({ type: 'stream_end' });
+            }
+
             const addOp = {
                 type: 'op',
                 op: 'add',
@@ -548,6 +615,18 @@ class ToolManagerClass {
 
         // Clear preview
         this.activePreview = null;
+        
+        // Auto-select newly created object (unless pencil)
+        if (optimisticObj.obj_type !== 'pencil') {
+            window.AppState.activeTool = 'select';
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            const selectBtn = document.getElementById('tool-select');
+            if(selectBtn) selectBtn.classList.add('active');
+            document.getElementById('canvas-container').style.cursor = 'default';
+            
+            window.CollabCanvas.selectObject(optimisticObj.obj_id);
+            this._syncUIForObject(optimisticObj);
+        }
     }
 
     /**
@@ -598,7 +677,11 @@ class ToolManagerClass {
 
         const commitText = () => {
             if (!this.activeTextEditor) return;
-            const content = textarea.value.trim();
+            // Prevent double execution if blur is fired while removing
+            const currentEditor = this.activeTextEditor;
+            this.activeTextEditor = null;
+
+            const content = currentEditor.value.trim();
             
             if (content.length > 0) {
                 // Generate uuid
@@ -637,13 +720,22 @@ class ToolManagerClass {
                         window.UndoRedoManager.pushAction(addOp);
                     }
                 }
+                
+                // Auto-select text
+                window.AppState.activeTool = 'select';
+                document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                const selectBtn = document.getElementById('tool-select');
+                if(selectBtn) selectBtn.classList.add('active');
+                document.getElementById('canvas-container').style.cursor = 'default';
+                
+                window.CollabCanvas.selectObject(addOp.object.obj_id);
+                this._syncUIForObject(addOp.object);
             }
 
             // Cleanup
-            if (textarea.parentNode) {
-                textarea.parentNode.removeChild(textarea);
+            if (currentEditor.parentNode) {
+                currentEditor.parentNode.removeChild(currentEditor);
             }
-            this.activeTextEditor = null;
         };
 
         const handleKeydown = (e) => {

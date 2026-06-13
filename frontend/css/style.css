@@ -223,6 +223,16 @@ ul {
     box-shadow: var(--shadow-md);
 }
 
+@keyframes shake {
+  0%, 100% { transform: translateX(-50%); }
+  20%, 60% { transform: translateX(calc(-50% - 5px)); }
+  40%, 80% { transform: translateX(calc(-50% + 5px)); }
+}
+
+.shake-active {
+  animation: shake 0.4s ease-in-out;
+}
+
 /* Toolbar sections */
 .toolbar__section {
     display: flex;

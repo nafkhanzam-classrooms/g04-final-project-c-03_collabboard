@@ -184,7 +184,7 @@ function setActiveTool(toolName) {
     // Hide specific UI elements based on tool requirements
     const noFillTools = ['pencil', 'line', 'arrow', 'text'];
     const noStrokeToggleTools = ['pencil', 'line', 'arrow', 'text'];
-    const noColorTools = ['select', 'image']; // the user requested cursor tool has no color
+    const noColorTools = ['image']; // removed 'select' so properties can be edited
 
     if (noColorTools.includes(toolName)) {
         if (DOM.strokeControls) DOM.strokeControls.style.display = 'none';

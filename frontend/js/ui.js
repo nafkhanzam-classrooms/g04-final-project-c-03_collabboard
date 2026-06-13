@@ -244,11 +244,49 @@
         _renderParticipants();
     });
 
-    if (DOM.exportBtn) {
-        DOM.exportBtn.addEventListener('click', () => {
-            if (window.CollabCanvas) {
-                window.CollabCanvas.exportToPNG();
+    // --- Easter Egg Logic ---
+    let consecutiveClicks = 0;
+    let easterEggLevel = 0;
+    let lastClickTime = 0;
+    const menuBtn = document.getElementById('toolbar-menu-btn');
+    const toolbar = document.getElementById('toolbar');
+    const easterEggModal = document.getElementById('easter-egg-modal');
+    const easterEggCloseBtn = document.getElementById('easter-egg-close-btn');
+
+    if (menuBtn) {
+        menuBtn.addEventListener('click', () => {
+            const now = performance.now();
+            if (now - lastClickTime < 500) {
+                consecutiveClicks++;
+            } else {
+                consecutiveClicks = 1;
             }
+            lastClickTime = now;
+
+            if (consecutiveClicks >= 10) {
+                consecutiveClicks = 0;
+                easterEggLevel++;
+
+                if (easterEggLevel === 1 || easterEggLevel === 2) {
+                    if (toolbar) {
+                        toolbar.classList.add('shake-active');
+                        setTimeout(() => {
+                            toolbar.classList.remove('shake-active');
+                        }, 400);
+                    }
+                } else if (easterEggLevel >= 3) {
+                    if (easterEggModal) {
+                        easterEggModal.setAttribute('aria-hidden', 'false');
+                    }
+                    easterEggLevel = 0; // Reset for next time
+                }
+            }
+        });
+    }
+
+    if (easterEggCloseBtn && easterEggModal) {
+        easterEggCloseBtn.addEventListener('click', () => {
+            easterEggModal.setAttribute('aria-hidden', 'true');
         });
     }
 
