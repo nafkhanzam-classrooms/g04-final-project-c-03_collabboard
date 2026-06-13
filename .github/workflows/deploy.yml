@@ -1,0 +1,89 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Downcase REPO
+        run: |
+          echo "REPO=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.REPO }}:latest
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Downcase REPO
+        run: |
+          echo "REPO=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
+
+      - name: Deploy to DigitalOcean Droplet
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_REPOSITORY_LOWERCASE: ${{ env.REPO }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: root
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: GITHUB_REPOSITORY_LOWERCASE,POSTGRES_PASSWORD,GHCR_PAT
+          script: |
+            export GITHUB_REPOSITORY_LOWERCASE=$GITHUB_REPOSITORY_LOWERCASE
+            export POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+            
+            # Navigate to repo directory
+            cd /root/collabboard
+            
+            # Pull latest code to get infra/ updates
+            git pull origin main
+            
+            # Login to GHCR (required if package is private)
+            if [ ! -z "$GHCR_PAT" ]; then
+              echo $GHCR_PAT | docker login ghcr.io -u github-actions --password-stdin
+            fi
+            
+            # Pull new images
+            docker compose -f infra/docker-compose.yml pull backend-1 backend-2
+            
+            # Restart containers (zero-downtime rolling restart)
+            docker compose -f infra/docker-compose.yml up -d --no-deps backend-1
+            sleep 10
+            docker compose -f infra/docker-compose.yml up -d --no-deps backend-2
+            
+            # Prune old images to save Droplet disk space
+            docker system prune -f
