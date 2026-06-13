@@ -61,6 +61,7 @@ jobs:
           host: ${{ secrets.DROPLET_IP }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
+          passphrase: ${{ secrets.DROPLET_SSH_PASSPHRASE }}
           envs: GITHUB_REPOSITORY_LOWERCASE,POSTGRES_PASSWORD,GHCR_PAT
           script: |
             export GITHUB_REPOSITORY_LOWERCASE=$GITHUB_REPOSITORY_LOWERCASE
