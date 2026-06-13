@@ -34,14 +34,16 @@ const geometry = {
                     width: properties.radius * 2 + 2 * sw,
                     height: properties.radius * 2 + 2 * sw
                 };
-            case 'heart':
-                // Approximate bounding box for the bezier curve heart
+            case 'heart': {
+                // Exact bounding box calculated from cubic bezier extrema
+                const s = properties.size / 2;
                 return {
-                    x: properties.cx - properties.size * 1.5 - sw,
-                    y: properties.cy - properties.size * 1.5 - sw,
-                    width: properties.size * 3 + 2 * sw,
-                    height: properties.size * 3 + 2 * sw
+                    x: properties.cx - s * 0.693 - sw,
+                    y: properties.cy - s * 0.927 - sw,
+                    width: s * 1.386 + 2 * sw,
+                    height: s * 1.327 + 2 * sw
                 };
+            }
             case 'line':
             case 'arrow':
                 return {
@@ -181,7 +183,8 @@ const geometry = {
             // Heart hit detection can use a bounding box approximation or an inner circle
             const dist = Math.sqrt((mx - properties.cx) ** 2 + (my - properties.cy) ** 2);
             if (properties.fill_color) {
-                return dist <= properties.size * 1.5 + tol;
+                // Inner filled area circle approximation
+                return dist <= properties.size * 0.35 + tol;
             } else {
                 // Just check bounding box for simplicity if not filled
                 const bbox = this.getBoundingBox(obj);

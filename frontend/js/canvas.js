@@ -67,6 +67,12 @@ class CanvasRenderer {
         this.remoteSelections = new Map();
 
         /**
+         * Phase 2, Sprint 5: Remote streams (active strokes)
+         * @type {Map<string, Object>}
+         */
+        this.remoteStreams = new Map();
+
+        /**
          * Selection State (Phase 2, Sprint 3)
          */
         this.selectedObjectId = null;
@@ -94,7 +100,12 @@ class CanvasRenderer {
             window.network.on('op_broadcast', (data) => this.handleOpBroadcast(data));
             window.network.on('op_ack', (data) => this.handleOpAck(data));
             window.network.on('selection_update', (data) => this.handleSelectionUpdate(data));
-            window.network.on('user_left', (data) => this.remoteSelections.delete(data.user_id));
+            window.network.on('stream_points', (data) => this.handleStreamPoints(data));
+            window.network.on('stream_end', (data) => this.handleStreamEnd(data));
+            window.network.on('user_left', (data) => {
+                this.remoteSelections.delete(data.user_id);
+                this.remoteStreams.delete(data.user_id);
+            });
         }
 
         // Start the render loop
@@ -254,6 +265,22 @@ class CanvasRenderer {
         }
     }
 
+    // --- Phase 2, Sprint 5: Remote Streams ---
+
+    handleStreamPoints(data) {
+        if (data.user_id === window.AppState?.userId) return;
+        this.remoteStreams.set(data.user_id, {
+            obj_type: data.obj_type,
+            color: data.color,
+            stroke_width: data.stroke_width,
+            properties: { points: data.points }
+        });
+    }
+
+    handleStreamEnd(data) {
+        this.remoteStreams.delete(data.user_id);
+    }
+
     // --- Selection Helpers (Phase 2, Sprint 3) ---
 
     selectObject(objId) { 
@@ -326,6 +353,13 @@ class CanvasRenderer {
                 this.remoteSelections.delete(userId);
             }
         }
+
+        // 4.75 Draw remote streams (Phase 2, Sprint 5)
+        this.ctx.globalAlpha = 0.5;
+        for (const [userId, stream] of this.remoteStreams) {
+            this.drawObject(stream);
+        }
+        this.ctx.globalAlpha = 1.0;
 
         // 5. Draw the in-progress tool stroke on top
         if (window.ToolManager) {
@@ -608,8 +642,23 @@ class CanvasRenderer {
         tempCtx.fillStyle = computedStyle.backgroundColor || '#ffffff';
         tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
 
-        // Draw the main canvas (which has a transparent background) onto the solid background
-        tempCtx.drawImage(this.canvas, 0, 0);
+        // Temporarily point this.ctx to tempCtx to reuse drawObject
+        const originalCtx = this.ctx;
+        this.ctx = tempCtx;
+
+        // Draw committed objects (Z-index sorted)
+        const sortedObjects = Array.from(this.objects.values()).sort((a, b) => a.z_index - b.z_index);
+        for (const obj of sortedObjects) {
+            this.drawObject(obj);
+        }
+
+        // Draw pending optimistic objects
+        for (const obj of this.pendingAdds) {
+            this.drawObject(obj);
+        }
+
+        // Restore original rendering context
+        this.ctx = originalCtx;
 
         // Generate PNG data URL
         const dataUrl = tempCanvas.toDataURL('image/png');
