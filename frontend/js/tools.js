@@ -24,6 +24,9 @@ class ToolManagerClass {
         this.activePreview = null;
         this.hoverPreview = null;
 
+        // Phase 2, Sprint 5: Stroke Streaming throttle
+        this._lastStreamTime = 0;
+
         // Bind event handlers
         this.onMouseDown = this.onMouseDown.bind(this);
         this.onMouseMove = this.onMouseMove.bind(this);
@@ -65,11 +68,14 @@ class ToolManagerClass {
         // Only trigger on primary click (left button)
         if (e.button !== 0) return;
         
-        // 'select' tool doesn't draw
-        if (window.AppState.activeTool === 'select') return;
+        const { x, y } = this.getLogicalCoordinates(e);
+
+        if (window.AppState.activeTool === 'select') {
+            this._handleSelectMouseDown(x, y);
+            return;
+        }
 
         this.isDrawing = true;
-        const { x, y } = this.getLogicalCoordinates(e);
 
         if (window.AppState.activeTool === 'text') {
             e.preventDefault(); // Prevent default mousedown from instantly blurring the textarea
@@ -90,6 +96,7 @@ class ToolManagerClass {
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points = [[x, y]];
+            this._lastStreamTime = performance.now();
         } else if (this.activePreview.obj_type === 'image_placement') {
             this.activePreview.properties.x = x;
             this.activePreview.properties.y = y;
@@ -107,6 +114,16 @@ class ToolManagerClass {
     onMouseMove(e) {
         const { x, y } = this.getLogicalCoordinates(e);
 
+        if (window.AppState.activeTool === 'select') {
+            // Update hover cursor for handles
+            this._updateSelectCursor(x, y);
+            
+            if (this.isDrawing || window.CollabCanvas.isResizing) {
+                this._handleSelectMouseMove(x, y);
+            }
+            return;
+        }
+
         if (!this.isDrawing) {
             // Hover preview for image placement
             if (window.AppState.activeTool === 'image_placement' && window.AppState.previewImage) {
@@ -121,6 +138,21 @@ class ToolManagerClass {
 
         if (this.activePreview.obj_type === 'pencil') {
             this.activePreview.properties.points.push([x, y]);
+            
+            // Phase 2, Sprint 5: Stream Points
+            const now = performance.now();
+            if (now - this._lastStreamTime >= 30) {
+                this._lastStreamTime = now;
+                if (window.network && window.network.isIdentified) {
+                    window.network.send({
+                        type: 'stream_points',
+                        obj_type: 'pencil',
+                        color: this.activePreview.color,
+                        stroke_width: this.activePreview.stroke_width,
+                        points: this.activePreview.properties.points
+                    });
+                }
+            }
         } else if (this.activePreview.obj_type === 'rectangle') {
             // Calculate width and height (can be negative during drag, so we normalize later or draw as is)
             this.activePreview.properties.x = Math.min(this.activePreview.startX, x);
@@ -156,7 +188,7 @@ class ToolManagerClass {
             const dy = y - this.activePreview.startY;
             this.activePreview.properties.cx = this.activePreview.startX;
             this.activePreview.properties.cy = this.activePreview.startY;
-            this.activePreview.properties.radius = Math.sqrt(dx * dx + dy * dy);
+            this.activePreview.properties.radius = Math.round(Math.sqrt(dx * dx + dy * dy));
         } else if (this.activePreview.obj_type === 'line' || this.activePreview.obj_type === 'arrow') {
             this.activePreview.properties.x1 = this.activePreview.startX;
             this.activePreview.properties.y1 = this.activePreview.startY;
@@ -167,11 +199,16 @@ class ToolManagerClass {
             const dy = y - this.activePreview.startY;
             this.activePreview.properties.cx = this.activePreview.startX;
             this.activePreview.properties.cy = this.activePreview.startY;
-            this.activePreview.properties.size = Math.sqrt(dx * dx + dy * dy);
+            this.activePreview.properties.size = Math.round(Math.sqrt(dx * dx + dy * dy));
         }
     }
 
     onMouseUp(e) {
+        if (window.AppState.activeTool === 'select' && (this.isDrawing || window.CollabCanvas.isResizing)) {
+            this._handleSelectMouseUp(e);
+            return;
+        }
+
         if (!this.isDrawing) return;
         this.isDrawing = false;
         
@@ -181,9 +218,263 @@ class ToolManagerClass {
     onMouseLeave(e) {
         // If they drag outside the canvas, we can either stop or keep drawing.
         // We'll finish the stroke if they leave.
+        if (window.AppState.activeTool === 'select' && (this.isDrawing || window.CollabCanvas.isResizing)) {
+            this._handleSelectMouseUp(e);
+            return;
+        }
+
         if (this.isDrawing) {
             this.isDrawing = false;
             this.finishStroke();
+        }
+    }
+
+    // --- Select Tool Implementation (Phase 2, Sprint 3) ---
+
+    _handleSelectMouseDown(x, y) {
+        const canvasRenderer = window.CollabCanvas;
+        const selectedObj = canvasRenderer.getSelectedObject();
+
+        if (selectedObj) {
+            // Check if we hit a handle
+            const handle = window.geometry.hitTestHandle(selectedObj, x, y, canvasRenderer.ctx);
+            if (handle) {
+                canvasRenderer.isResizing = true;
+                canvasRenderer.selectedHandle = handle;
+                // Deep copy the state for computing delta later and for Undo/Redo
+                canvasRenderer.resizeStart = {
+                    mx: x,
+                    my: y,
+                    snapshot: JSON.parse(JSON.stringify(selectedObj))
+                };
+                return;
+            }
+            
+            // Check if we hit the selected object body (pass isSelected = true)
+            if (window.geometry.hitTest(selectedObj, x, y, canvasRenderer.ctx, 5, true)) {
+                this.isDrawing = true; // Use isDrawing as "isDragging"
+                canvasRenderer.resizeStart = {
+                    mx: x,
+                    my: y,
+                    snapshot: JSON.parse(JSON.stringify(selectedObj))
+                };
+                return;
+            }
+        }
+
+        // Iterate objects in reverse z-order to find hit
+        const sortedObjects = Array.from(canvasRenderer.objects.values()).sort((a, b) => {
+            if (a.z_index !== b.z_index) return b.z_index - a.z_index; // Reverse z-index
+            return (b.seq || 0) - (a.seq || 0);
+        });
+
+        let foundHit = false;
+        for (const obj of sortedObjects) {
+            if (!obj.is_deleted && window.geometry.hitTest(obj, x, y, canvasRenderer.ctx)) {
+                canvasRenderer.selectObject(obj.obj_id);
+                foundHit = true;
+                
+                // Allow dragging immediately upon selection
+                this.isDrawing = true;
+                canvasRenderer.resizeStart = {
+                    mx: x,
+                    my: y,
+                    snapshot: JSON.parse(JSON.stringify(obj))
+                };
+
+                // Sync UI state using helper
+                this._syncUIForObject(obj);
+
+                break;
+            }
+        }
+
+        if (!foundHit) {
+            canvasRenderer.clearSelection();
+            
+            // Reset UI visibility to default for the active tool
+            if (typeof setActiveTool === 'function' && window.AppState) {
+                setActiveTool(window.AppState.activeTool);
+            }
+        }
+    }
+
+    _handleSelectMouseMove(x, y) {
+        const canvasRenderer = window.CollabCanvas;
+        const selectedObj = canvasRenderer.getSelectedObject();
+        if (!selectedObj || !canvasRenderer.resizeStart) return;
+
+        const dx = x - canvasRenderer.resizeStart.mx;
+        const dy = y - canvasRenderer.resizeStart.my;
+
+        if (canvasRenderer.isResizing) {
+            // Resize
+            const handle = canvasRenderer.selectedHandle;
+            const newProps = window.geometry.computeResize(selectedObj, handle, canvasRenderer.resizeStart.snapshot, dx, dy, canvasRenderer.ctx);
+            // Apply locally for preview
+            selectedObj.properties = newProps;
+        } else if (this.isDrawing) {
+            // Drag
+            const newProps = window.geometry.computeMove(selectedObj, canvasRenderer.resizeStart.snapshot, dx, dy);
+            // Apply locally for preview
+            selectedObj.properties = newProps;
+        }
+    }
+
+    _handleSelectMouseUp(e) {
+        const canvasRenderer = window.CollabCanvas;
+        
+        if (canvasRenderer.isResizing || this.isDrawing) {
+            const selectedObj = canvasRenderer.getSelectedObject();
+            if (selectedObj && canvasRenderer.resizeStart) {
+                // Determine if there was an actual change
+                const dx = canvasRenderer.resizeStart.mx - this.getLogicalCoordinates(e).x;
+                const dy = canvasRenderer.resizeStart.my - this.getLogicalCoordinates(e).y;
+                
+                // If dragged/resized, send op: modify
+                const oldSnapshot = canvasRenderer.resizeStart.snapshot;
+                
+                // We send only properties that changed.
+                const changes = {
+                    properties: selectedObj.properties
+                };
+
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: changes
+                };
+
+                if (window.network && window.network.isIdentified) {
+                    window.network.send(modifyOp);
+                    if (window.UndoRedoManager) {
+                        // UndoRedoManager expects the old values for undo and new for redo
+                        const undoOp = {
+                            type: 'op',
+                            op: 'modify',
+                            obj_id: selectedObj.obj_id,
+                            changes: changes,
+                            old_values: { properties: oldSnapshot.properties }
+                        };
+                        window.UndoRedoManager.pushAction(undoOp);
+                    }
+                }
+            }
+        }
+
+        this.isDrawing = false;
+        canvasRenderer.isResizing = false;
+        canvasRenderer.resizeStart = null;
+        canvasRenderer.selectedHandle = null;
+    }
+
+    _updateSelectCursor(x, y) {
+        const canvasRenderer = window.CollabCanvas;
+        const selectedObj = canvasRenderer.getSelectedObject();
+        if (!selectedObj) {
+            this.canvas.style.cursor = 'default';
+            return;
+        }
+
+        const handle = window.geometry.hitTestHandle(selectedObj, x, y, canvasRenderer.ctx);
+        if (handle) {
+            if (handle === 'nw' || handle === 'se') this.canvas.style.cursor = 'nwse-resize';
+            else if (handle === 'ne' || handle === 'sw') this.canvas.style.cursor = 'nesw-resize';
+            else if (handle === 'n' || handle === 's') this.canvas.style.cursor = 'ns-resize';
+            else if (handle === 'e' || handle === 'w') this.canvas.style.cursor = 'ew-resize';
+            else if (handle === 'p1' || handle === 'p2') this.canvas.style.cursor = 'crosshair';
+        } else if (window.geometry.hitTest(selectedObj, x, y, canvasRenderer.ctx)) {
+            this.canvas.style.cursor = 'move';
+        } else {
+            this.canvas.style.cursor = 'default';
+        }
+    }
+
+    _syncUIForObject(obj) {
+        const strokeColorInput = document.getElementById('tool-stroke-color');
+        const fillColorInput = document.getElementById('tool-fill-color');
+        const strokeWidthInput = document.getElementById('tool-stroke-width');
+        const fillToggleBtn = document.getElementById('tool-fill-toggle');
+        const strokeToggleBtn = document.getElementById('tool-stroke-toggle');
+        
+        const strokeControls = document.getElementById('stroke-controls');
+        const strokeSeparator = document.getElementById('stroke-separator');
+        const fillControls = document.getElementById('fill-controls');
+        const fillSeparator = document.getElementById('fill-separator');
+
+        if (obj.obj_type === 'image') {
+            if (strokeControls) strokeControls.style.display = 'none';
+            if (strokeSeparator) strokeSeparator.style.display = 'none';
+            if (fillControls) fillControls.style.display = 'none';
+            if (fillSeparator) fillSeparator.style.display = 'none';
+            if (strokeWidthInput) strokeWidthInput.style.display = 'none';
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput) fontSizeInput.style.display = 'none';
+            return;
+        } else {
+            if (strokeControls) strokeControls.style.display = 'flex';
+            if (strokeSeparator) strokeSeparator.style.display = 'block';
+        }
+
+        if (strokeColorInput && obj.color) {
+            strokeColorInput.value = obj.color;
+            window.AppState.strokeColor = obj.color;
+            const strokeColorSwatch = document.getElementById('tool-stroke-swatch');
+            if (strokeColorSwatch) strokeColorSwatch.style.background = obj.color;
+        }
+        
+        if (fillColorInput && obj.properties.fill_color) {
+            fillColorInput.value = obj.properties.fill_color;
+            window.AppState.fillColor = obj.properties.fill_color;
+            const fillColorSwatch = document.getElementById('tool-fill-swatch');
+            if (fillColorSwatch) fillColorSwatch.style.background = obj.properties.fill_color;
+        }
+        
+        if (strokeWidthInput && obj.stroke_width !== undefined) {
+            strokeWidthInput.value = obj.stroke_width === 0 ? window.AppState.strokeWidth : obj.stroke_width;
+            if (obj.stroke_width > 0) window.AppState.strokeWidth = obj.stroke_width;
+        }
+        
+        if (obj.obj_type === 'text') {
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput && obj.properties.font_size) {
+                fontSizeInput.style.display = 'inline-block';
+                fontSizeInput.value = obj.properties.font_size;
+                window.AppState.fontSize = obj.properties.font_size;
+            }
+            if (strokeWidthInput) strokeWidthInput.style.display = 'none';
+        } else {
+            const fontSizeInput = document.getElementById('tool-font-size');
+            if (fontSizeInput) fontSizeInput.style.display = 'none';
+            if (strokeWidthInput) strokeWidthInput.style.display = 'inline-block';
+        }
+
+        const noFillTools = ['pencil', 'line', 'arrow', 'text'];
+
+        if (noFillTools.includes(obj.obj_type)) {
+            if (fillControls) fillControls.style.display = 'none';
+            if (fillSeparator) fillSeparator.style.display = 'none';
+        } else {
+            if (fillControls) fillControls.style.display = 'flex';
+            if (fillSeparator) fillSeparator.style.display = 'block';
+            if (fillToggleBtn) {
+                const hasFill = !!obj.properties.fill_color;
+                window.AppState.fillEnabled = hasFill;
+                fillToggleBtn.classList.toggle('active', hasFill);
+            }
+        }
+        
+        const noStrokeToggleTools = ['pencil', 'line', 'arrow', 'text'];
+        if (noStrokeToggleTools.includes(obj.obj_type)) {
+            if (strokeToggleBtn) strokeToggleBtn.style.display = 'none';
+        } else {
+            if (strokeToggleBtn) {
+                strokeToggleBtn.style.display = 'flex';
+                const hasStroke = obj.stroke_width > 0;
+                window.AppState.strokeEnabled = hasStroke;
+                strokeToggleBtn.classList.toggle('active', hasStroke);
+            }
         }
     }
 
@@ -236,13 +527,7 @@ class ToolManagerClass {
             delete this.activePreview.properties.naturalWidth;
             delete this.activePreview.properties.naturalHeight;
 
-            // Reset UX to normal select mode
-            window.AppState.activeTool = 'select';
-            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-            const selectBtn = document.getElementById('tool-select');
-            if(selectBtn) selectBtn.classList.add('active');
             window.AppState.previewImage = null;
-            document.getElementById('canvas-container').style.cursor = 'default';
             this.activePreview.properties.fill_color = window.AppState.fillEnabled ? window.AppState.fillColor : null;
         } else if (this.activePreview.obj_type === 'circle') {
             if (!this.activePreview.properties.radius || this.activePreview.properties.radius < 2) {
@@ -308,6 +593,11 @@ class ToolManagerClass {
 
         // 2. Network Send
         if (window.network && window.network.isIdentified) {
+            // Phase 2, Sprint 5: Stream End
+            if (this.activePreview.obj_type === 'pencil') {
+                window.network.send({ type: 'stream_end' });
+            }
+
             const addOp = {
                 type: 'op',
                 op: 'add',
@@ -325,6 +615,18 @@ class ToolManagerClass {
 
         // Clear preview
         this.activePreview = null;
+        
+        // Auto-select newly created object (unless pencil)
+        if (optimisticObj.obj_type !== 'pencil') {
+            window.AppState.activeTool = 'select';
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            const selectBtn = document.getElementById('tool-select');
+            if(selectBtn) selectBtn.classList.add('active');
+            document.getElementById('canvas-container').style.cursor = 'default';
+            
+            window.CollabCanvas.selectObject(optimisticObj.obj_id);
+            this._syncUIForObject(optimisticObj);
+        }
     }
 
     /**
@@ -375,7 +677,11 @@ class ToolManagerClass {
 
         const commitText = () => {
             if (!this.activeTextEditor) return;
-            const content = textarea.value.trim();
+            // Prevent double execution if blur is fired while removing
+            const currentEditor = this.activeTextEditor;
+            this.activeTextEditor = null;
+
+            const content = currentEditor.value.trim();
             
             if (content.length > 0) {
                 // Generate uuid
@@ -414,13 +720,22 @@ class ToolManagerClass {
                         window.UndoRedoManager.pushAction(addOp);
                     }
                 }
+                
+                // Auto-select text
+                window.AppState.activeTool = 'select';
+                document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                const selectBtn = document.getElementById('tool-select');
+                if(selectBtn) selectBtn.classList.add('active');
+                document.getElementById('canvas-container').style.cursor = 'default';
+                
+                window.CollabCanvas.selectObject(addOp.object.obj_id);
+                this._syncUIForObject(addOp.object);
             }
 
             // Cleanup
-            if (textarea.parentNode) {
-                textarea.parentNode.removeChild(textarea);
+            if (currentEditor.parentNode) {
+                currentEditor.parentNode.removeChild(currentEditor);
             }
-            this.activeTextEditor = null;
         };
 
         const handleKeydown = (e) => {

@@ -93,6 +93,9 @@ RELAYABLE_TYPES: frozenset[str] = frozenset({
     "canvas_snapshot",
     "cursor_update",
     "cursor_chat_broadcast",
+    "selection_update",
+    "stream_points",
+    "stream_end",
 })
 
 

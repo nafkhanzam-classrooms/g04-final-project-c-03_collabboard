@@ -33,7 +33,31 @@
         DOM.modalJoinBtn.disabled = isLoading;
         DOM.modalCreateBtn.disabled = isLoading;
         DOM.modalJoinBtn.textContent = isLoading ? 'Connecting...' : 'Join Room';
-        DOM.modalCreateBtn.textContent = isLoading ? 'Connecting...' : 'Create New Room';
+        DOM.modalCreateBtn.textContent = isLoading ? 'Connecting...' : 'Create Room';
+    }
+
+    function switchModalTab(tab) {
+        clearError();
+        if (tab === 'create') {
+            DOM.modalTabCreate.classList.add('active');
+            DOM.modalTabJoin.classList.remove('active');
+            DOM.modalFieldRoomCode.style.display = 'none';
+            DOM.modalCreateBtn.style.display = 'block';
+            DOM.modalJoinBtn.style.display = 'none';
+            setTimeout(() => DOM.modalUsername.focus(), 50);
+        } else {
+            DOM.modalTabJoin.classList.add('active');
+            DOM.modalTabCreate.classList.remove('active');
+            DOM.modalFieldRoomCode.style.display = 'flex';
+            DOM.modalJoinBtn.style.display = 'block';
+            DOM.modalCreateBtn.style.display = 'none';
+            setTimeout(() => DOM.modalRoomCode.focus(), 50);
+        }
+    }
+
+    if (DOM.modalTabCreate && DOM.modalTabJoin) {
+        DOM.modalTabCreate.addEventListener('click', () => switchModalTab('create'));
+        DOM.modalTabJoin.addEventListener('click', () => switchModalTab('join'));
     }
 
     function handleConnect(action) {
@@ -81,7 +105,10 @@
 
     // Allow Enter key to submit
     DOM.modalUsername.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleConnect(DOM.modalRoomCode.value.trim() ? 'join' : 'create');
+        if (e.key === 'Enter') {
+            const isJoin = DOM.modalTabJoin.classList.contains('active');
+            handleConnect(isJoin ? 'join' : 'create');
+        }
     });
     DOM.modalRoomCode.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') handleConnect('join');
@@ -217,11 +244,49 @@
         _renderParticipants();
     });
 
-    if (DOM.exportBtn) {
-        DOM.exportBtn.addEventListener('click', () => {
-            if (window.CollabCanvas) {
-                window.CollabCanvas.exportToPNG();
+    // --- Easter Egg Logic ---
+    let consecutiveClicks = 0;
+    let easterEggLevel = 0;
+    let lastClickTime = 0;
+    const menuBtn = document.getElementById('toolbar-menu-btn');
+    const toolbar = document.getElementById('toolbar');
+    const easterEggModal = document.getElementById('easter-egg-modal');
+    const easterEggCloseBtn = document.getElementById('easter-egg-close-btn');
+
+    if (menuBtn) {
+        menuBtn.addEventListener('click', () => {
+            const now = performance.now();
+            if (now - lastClickTime < 500) {
+                consecutiveClicks++;
+            } else {
+                consecutiveClicks = 1;
             }
+            lastClickTime = now;
+
+            if (consecutiveClicks >= 10) {
+                consecutiveClicks = 0;
+                easterEggLevel++;
+
+                if (easterEggLevel === 1 || easterEggLevel === 2) {
+                    if (toolbar) {
+                        toolbar.classList.add('shake-active');
+                        setTimeout(() => {
+                            toolbar.classList.remove('shake-active');
+                        }, 400);
+                    }
+                } else if (easterEggLevel >= 3) {
+                    if (easterEggModal) {
+                        easterEggModal.setAttribute('aria-hidden', 'false');
+                    }
+                    easterEggLevel = 0; // Reset for next time
+                }
+            }
+        });
+    }
+
+    if (easterEggCloseBtn && easterEggModal) {
+        easterEggCloseBtn.addEventListener('click', () => {
+            easterEggModal.setAttribute('aria-hidden', 'true');
         });
     }
 

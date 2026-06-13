@@ -61,6 +61,26 @@ class CanvasRenderer {
         this.tombstones = new Set();
 
         /**
+         * Remote selections map: user_id -> { obj_id, username }
+         * @type {Map<string, {obj_id: string, username: string}>}
+         */
+        this.remoteSelections = new Map();
+
+        /**
+         * Phase 2, Sprint 5: Remote streams (active strokes)
+         * @type {Map<string, Object>}
+         */
+        this.remoteStreams = new Map();
+
+        /**
+         * Selection State (Phase 2, Sprint 3)
+         */
+        this.selectedObjectId = null;
+        this.selectedHandle = null;
+        this.isResizing = false;
+        this.resizeStart = null;
+
+        /**
          * Day 10: Cache of HTMLImageElement instances keyed by base64 data hash.
          * Prevents re-creating Image objects every frame in the render loop.
          * @type {Map<string, HTMLImageElement>}
@@ -79,6 +99,13 @@ class CanvasRenderer {
             window.network.on('canvas_snapshot', (data) => this.handleSnapshot(data));
             window.network.on('op_broadcast', (data) => this.handleOpBroadcast(data));
             window.network.on('op_ack', (data) => this.handleOpAck(data));
+            window.network.on('selection_update', (data) => this.handleSelectionUpdate(data));
+            window.network.on('stream_points', (data) => this.handleStreamPoints(data));
+            window.network.on('stream_end', (data) => this.handleStreamEnd(data));
+            window.network.on('user_left', (data) => {
+                this.remoteSelections.delete(data.user_id);
+                this.remoteStreams.delete(data.user_id);
+            });
         }
 
         // Start the render loop
@@ -155,6 +182,11 @@ class CanvasRenderer {
             
             // Remove the object entirely from local state
             this.objects.delete(data.obj_id);
+
+            // Phase 2, Sprint 3: Handle remote delete of selected object
+            if (this.selectedObjectId === data.obj_id) {
+                this.clearSelection();
+            }
         }
     }
 
@@ -176,6 +208,11 @@ class CanvasRenderer {
                     
                     if (window.UndoRedoManager) {
                         window.UndoRedoManager.updateObjectId(tempId, data.obj_id);
+                    }
+                    
+                    // If this object was selected locally, update the selection ID
+                    if (this.selectedObjectId === tempId) {
+                        this.selectObject(data.obj_id);
                     }
                 }
             }
@@ -219,6 +256,59 @@ class CanvasRenderer {
         }
     }
 
+    handleSelectionUpdate(data) {
+        if (data.user_id === window.AppState?.userId) return;
+        if (data.obj_id) {
+            this.remoteSelections.set(data.user_id, { obj_id: data.obj_id, username: data.username });
+        } else {
+            this.remoteSelections.delete(data.user_id);
+        }
+    }
+
+    // --- Phase 2, Sprint 5: Remote Streams ---
+
+    handleStreamPoints(data) {
+        if (data.user_id === window.AppState?.userId) return;
+        this.remoteStreams.set(data.user_id, {
+            obj_type: data.obj_type,
+            color: data.color,
+            stroke_width: data.stroke_width,
+            properties: { points: data.points }
+        });
+    }
+
+    handleStreamEnd(data) {
+        this.remoteStreams.delete(data.user_id);
+    }
+
+    // --- Selection Helpers (Phase 2, Sprint 3) ---
+
+    selectObject(objId) { 
+        if (this.selectedObjectId !== objId) {
+            this.selectedObjectId = objId; 
+            if (window.network && window.network.isIdentified && window.AppState?.roomId) {
+                window.network.send({ type: 'selection_update', obj_id: objId });
+            }
+        }
+    }
+    
+    clearSelection() { 
+        if (this.selectedObjectId !== null) {
+            this.selectedObjectId = null; 
+            this.selectedHandle = null; 
+            this.isResizing = false;
+            this.resizeStart = null;
+            if (window.network && window.network.isIdentified && window.AppState?.roomId) {
+                window.network.send({ type: 'selection_update', obj_id: null });
+            }
+        }
+    }
+    
+    getSelectedObject() { 
+        if (!this.selectedObjectId) return null;
+        return this.objects.get(this.selectedObjectId) || null; 
+    }
+
     /**
      * Core render loop called by requestAnimationFrame.
      */
@@ -243,7 +333,35 @@ class CanvasRenderer {
             }
         }
 
-        // 4. Draw the in-progress tool stroke on top
+        // 4. Draw selection box and handles
+        if (this.selectedObjectId) {
+            const selectedObj = this.objects.get(this.selectedObjectId);
+            if (selectedObj) {
+                this.drawSelection(selectedObj);
+            } else {
+                // Object was deleted remotely
+                this.clearSelection();
+            }
+        }
+
+        // 4.5 Draw remote selections
+        for (const [userId, selection] of this.remoteSelections.entries()) {
+            const selectedObj = this.objects.get(selection.obj_id);
+            if (selectedObj && !selectedObj.is_deleted) {
+                this.drawRemoteSelection(selectedObj, selection.username);
+            } else if (!selectedObj) {
+                this.remoteSelections.delete(userId);
+            }
+        }
+
+        // 4.75 Draw remote streams (Phase 2, Sprint 5)
+        this.ctx.globalAlpha = 0.5;
+        for (const [userId, stream] of this.remoteStreams) {
+            this.drawObject(stream);
+        }
+        this.ctx.globalAlpha = 1.0;
+
+        // 5. Draw the in-progress tool stroke on top
         if (window.ToolManager) {
             window.ToolManager.renderPreview(this.ctx);
         }
@@ -418,6 +536,93 @@ class CanvasRenderer {
     }
 
     /**
+     * Phase 2, Sprint 3: Draw selection bounding box and handles.
+     */
+    drawSelection(obj) {
+        if (!window.geometry) return;
+
+        this.ctx.save();
+        
+        // Use an accent color for selection
+        const selectionColor = '#0d99ff'; 
+
+        // Draw bounding box
+        if (obj.obj_type !== 'line' && obj.obj_type !== 'arrow' && obj.obj_type !== 'pencil') {
+            const bbox = window.geometry.getBoundingBox(obj, this.ctx);
+            this.ctx.strokeStyle = selectionColor;
+            this.ctx.lineWidth = 1;
+            this.ctx.setLineDash([4, 4]); // Dashed line
+            this.ctx.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
+        }
+
+        this.ctx.setLineDash([]); // Reset dash for handles
+
+        // Draw resize handles
+        const handles = window.geometry.getHandles(obj, this.ctx);
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.strokeStyle = selectionColor;
+        this.ctx.lineWidth = 1.5;
+        
+        const hs = 5; // 10x10 handle
+
+        for (const h of handles) {
+            this.ctx.beginPath();
+            if (this.ctx.roundRect) {
+                this.ctx.roundRect(h.x - hs, h.y - hs, hs * 2, hs * 2, 2);
+            } else {
+                this.ctx.rect(h.x - hs, h.y - hs, hs * 2, hs * 2);
+            }
+            this.ctx.fill();
+            this.ctx.stroke();
+        }
+
+        this.ctx.restore();
+    }
+
+    /**
+     * Phase 2, Sprint 4.5: Draw remote selection bounding box and name tag.
+     */
+    drawRemoteSelection(obj, username) {
+        if (!window.geometry) return;
+        
+        // Reuse hue logic
+        const hue = Array.from(username).reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 360;
+        const color = `hsl(${hue}, 70%, 50%)`;
+
+        this.ctx.save();
+        
+        const bbox = window.geometry.getBoundingBox(obj, this.ctx);
+        
+        // Bounding box outline
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 2;
+        this.ctx.setLineDash([]);
+        this.ctx.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
+        
+        // Name tag background
+        this.ctx.font = '12px Inter, system-ui, sans-serif';
+        const textWidth = this.ctx.measureText(username).width;
+        const padX = 6;
+        const tagHeight = 20;
+        
+        this.ctx.fillStyle = color;
+        if (this.ctx.roundRect) {
+            this.ctx.beginPath();
+            this.ctx.roundRect(bbox.x, bbox.y - tagHeight, textWidth + padX * 2, tagHeight, [4, 4, 0, 0]);
+            this.ctx.fill();
+        } else {
+            this.ctx.fillRect(bbox.x, bbox.y - tagHeight, textWidth + padX * 2, tagHeight);
+        }
+        
+        // Name tag text
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(username, bbox.x + padX, bbox.y - tagHeight / 2);
+
+        this.ctx.restore();
+    }
+
+    /**
      * Day 9: Export the canvas as a PNG image.
      * Composites a solid background matching the current container style
      * before overlaying the transparent drawing canvas.
@@ -437,8 +642,23 @@ class CanvasRenderer {
         tempCtx.fillStyle = computedStyle.backgroundColor || '#ffffff';
         tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
 
-        // Draw the main canvas (which has a transparent background) onto the solid background
-        tempCtx.drawImage(this.canvas, 0, 0);
+        // Temporarily point this.ctx to tempCtx to reuse drawObject
+        const originalCtx = this.ctx;
+        this.ctx = tempCtx;
+
+        // Draw committed objects (Z-index sorted)
+        const sortedObjects = Array.from(this.objects.values()).sort((a, b) => a.z_index - b.z_index);
+        for (const obj of sortedObjects) {
+            this.drawObject(obj);
+        }
+
+        // Draw pending optimistic objects
+        for (const obj of this.pendingAdds) {
+            this.drawObject(obj);
+        }
+
+        // Restore original rendering context
+        this.ctx = originalCtx;
 
         // Generate PNG data URL
         const dataUrl = tempCanvas.toDataURL('image/png');

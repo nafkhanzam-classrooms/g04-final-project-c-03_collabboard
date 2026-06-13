@@ -139,11 +139,18 @@ const DOM = {
 
     // Modal
     roomModal: document.getElementById('room-modal'),
+    modalTabCreate: document.getElementById('modal-tab-create'),
+    modalTabJoin: document.getElementById('modal-tab-join'),
     modalUsername: document.getElementById('modal-username'),
     modalRoomCode: document.getElementById('modal-room-code'),
+    modalFieldRoomCode: document.getElementById('modal-field-room-code'),
     modalError: document.getElementById('modal-error'),
     modalJoinBtn: document.getElementById('modal-join-btn'),
     modalCreateBtn: document.getElementById('modal-create-btn'),
+    leaveBtn: document.getElementById('menu-leave-room'),
+    leaveModal: document.getElementById('leave-modal'),
+    leaveCancelBtn: document.getElementById('leave-cancel-btn'),
+    leaveProceedBtn: document.getElementById('leave-proceed-btn'),
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +158,10 @@ const DOM = {
 // ---------------------------------------------------------------------------
 function setActiveTool(toolName) {
     AppState.activeTool = toolName;
+
+    if (toolName !== 'select' && window.CollabCanvas) {
+        window.CollabCanvas.clearSelection();
+    }
 
     DOM.toolButtons.forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tool === toolName);
@@ -173,7 +184,7 @@ function setActiveTool(toolName) {
     // Hide specific UI elements based on tool requirements
     const noFillTools = ['pencil', 'line', 'arrow', 'text'];
     const noStrokeToggleTools = ['pencil', 'line', 'arrow', 'text'];
-    const noColorTools = ['select', 'image']; // the user requested cursor tool has no color
+    const noColorTools = ['image']; // removed 'select' so properties can be edited
 
     if (noColorTools.includes(toolName)) {
         if (DOM.strokeControls) DOM.strokeControls.style.display = 'none';
@@ -219,25 +230,124 @@ DOM.toolButtons.forEach(btn => {
 // Stroke & Fill Controls
 // ---------------------------------------------------------------------------
 
-function syncColors() {
+function syncColors(changedType) {
     DOM.strokeColorSwatch.style.background = DOM.strokeColorInput.value;
     AppState.strokeColor = DOM.strokeColorInput.value;
     
     DOM.fillColorSwatch.style.background = DOM.fillColorInput.value;
     AppState.fillColor = DOM.fillColorInput.value;
+
+    // Phase 2, Sprint 3: Live update selected object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && changedType) {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const changes = {};
+
+            if (changedType === 'stroke') {
+                changes.color = AppState.strokeColor;
+                selectedObj.color = AppState.strokeColor;
+            } else if (changedType === 'fill') {
+                changes.properties = { ...selectedObj.properties, fill_color: AppState.fillColor };
+                selectedObj.properties.fill_color = AppState.fillColor;
+            }
+
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: changes
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: changes,
+                        old_values: changedType === 'stroke' 
+                            ? { color: oldSnapshot.color }
+                            : { properties: { fill_color: oldSnapshot.properties.fill_color } }
+                    });
+                }
+            }
+        }
+    }
 }
 
-DOM.strokeColorInput.addEventListener('input', syncColors);
-DOM.fillColorInput.addEventListener('input', syncColors);
+DOM.strokeColorInput.addEventListener('input', () => syncColors('stroke'));
+DOM.fillColorInput.addEventListener('input', () => syncColors('fill'));
 
 DOM.strokeToggleBtn.addEventListener('click', () => {
     AppState.strokeEnabled = !AppState.strokeEnabled;
     DOM.strokeToggleBtn.classList.toggle('active', AppState.strokeEnabled);
+
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && selectedObj.obj_type !== 'text' && selectedObj.obj_type !== 'image') {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const newStrokeWidth = AppState.strokeEnabled ? AppState.strokeWidth : 0;
+            
+            selectedObj.stroke_width = newStrokeWidth;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { stroke_width: newStrokeWidth }
+                };
+                window.network.send(modifyOp);
+                
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { stroke_width: newStrokeWidth },
+                        old_values: { stroke_width: oldSnapshot.stroke_width }
+                    });
+                }
+            }
+        }
+    }
 });
 
 DOM.fillToggleBtn.addEventListener('click', () => {
     AppState.fillEnabled = !AppState.fillEnabled;
     DOM.fillToggleBtn.classList.toggle('active', AppState.fillEnabled);
+
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && ['rectangle', 'circle', 'heart'].includes(selectedObj.obj_type)) {
+            const oldSnapshot = JSON.parse(JSON.stringify(selectedObj));
+            const newFillColor = AppState.fillEnabled ? AppState.fillColor : null;
+            
+            selectedObj.properties.fill_color = newFillColor;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { properties: selectedObj.properties }
+                };
+                window.network.send(modifyOp);
+                
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { properties: selectedObj.properties },
+                        old_values: { properties: oldSnapshot.properties }
+                    });
+                }
+            }
+        }
+    }
 });
 
 // Initialize on load
@@ -250,11 +360,69 @@ syncColors();
 DOM.strokeWidthSelect.addEventListener('change', (e) => {
     AppState.strokeWidth = parseInt(e.target.value, 10);
     console.log(`[CollabBoard] Stroke width: ${AppState.strokeWidth}px`);
+
+    // Phase 2, Sprint 3: Update selected object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj) {
+            const oldWidth = selectedObj.stroke_width;
+            selectedObj.stroke_width = AppState.strokeWidth;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { stroke_width: AppState.strokeWidth }
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { stroke_width: AppState.strokeWidth },
+                        old_values: { stroke_width: oldWidth }
+                    });
+                }
+            }
+        }
+    }
 });
 
 DOM.fontSizeSelect.addEventListener('change', (e) => {
     AppState.fontSize = parseInt(e.target.value, 10);
     console.log(`[CollabBoard] Font size: ${AppState.fontSize}px`);
+
+    // Phase 2, Sprint 3: Update selected text object
+    if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+        const selectedObj = window.CollabCanvas.getSelectedObject();
+        if (selectedObj && selectedObj.obj_type === 'text') {
+            const oldSize = selectedObj.properties.font_size;
+            selectedObj.properties.font_size = AppState.fontSize;
+            
+            if (window.network && window.network.isIdentified) {
+                const modifyOp = {
+                    type: 'op',
+                    op: 'modify',
+                    obj_id: selectedObj.obj_id,
+                    changes: { properties: { font_size: AppState.fontSize } }
+                };
+                window.network.send(modifyOp);
+
+                if (window.UndoRedoManager) {
+                    window.UndoRedoManager.pushAction({
+                        type: 'op',
+                        op: 'modify',
+                        obj_id: selectedObj.obj_id,
+                        changes: { properties: { font_size: AppState.fontSize } },
+                        old_values: { properties: { font_size: oldSize } }
+                    });
+                }
+            }
+        }
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -652,6 +820,190 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         toggleSidebar();
     }
+
+    // -- Phase 2, Sprint 3: Delete Object --
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (window.CollabCanvas && window.CollabCanvas.selectedObjectId) {
+            e.preventDefault();
+            const selectedObj = window.CollabCanvas.getSelectedObject();
+            if (selectedObj) {
+                const snapshot = JSON.parse(JSON.stringify(selectedObj));
+                const objId = selectedObj.obj_id;
+
+                // Send delete operation
+                if (window.network && window.network.isIdentified) {
+                    const deleteOp = {
+                        type: 'op',
+                        op: 'delete',
+                        obj_id: objId
+                    };
+                    window.network.send(deleteOp);
+
+                    if (window.UndoRedoManager) {
+                        window.UndoRedoManager.pushAction({
+                            type: 'op',
+                            op: 'add',
+                            object: snapshot
+                        });
+                    }
+                }
+
+                // Remove optimistically and clear selection
+                window.CollabCanvas.removeOptimisticObject(objId);
+                window.CollabCanvas.clearSelection();
+            }
+        }
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2, Sprint 4: Clipboard Paste Handler
+// ---------------------------------------------------------------------------
+document.addEventListener('paste', async (e) => {
+    // 1. Prevent interception if user is typing
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+        return;
+    }
+
+    // 2. Check if we are in a room
+    if (!window.AppState.roomId) return;
+
+    // 3. Find the image item in clipboard
+    const items = e.clipboardData.items;
+    let imageFile = null;
+    for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+            imageFile = items[i].getAsFile();
+            break;
+        }
+    }
+
+    if (!imageFile) return;
+
+    e.preventDefault();
+
+    try {
+        const MAX_WIDTH = 600;
+        const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
+        
+        // Read file to data URL
+        const reader = new FileReader();
+        const base64Data = await new Promise((resolve, reject) => {
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(imageFile);
+        });
+
+        // Load into an Image object
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = base64Data;
+        });
+
+        let finalBase64 = base64Data;
+        let finalWidth = img.naturalWidth;
+        let finalHeight = img.naturalHeight;
+
+        // Scale if wider than 600px
+        if (finalWidth > MAX_WIDTH) {
+            const scale = MAX_WIDTH / finalWidth;
+            finalWidth = MAX_WIDTH;
+            finalHeight = Math.round(finalHeight * scale);
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = finalWidth;
+            offscreen.height = finalHeight;
+            const ctx = offscreen.getContext('2d');
+            ctx.drawImage(img, 0, 0, finalWidth, finalHeight);
+            finalBase64 = offscreen.toDataURL('image/jpeg', 0.8);
+        } else if (imageFile.size > MAX_FILE_SIZE) {
+            // Even if not wider than 600px, if it's over 2MB, try to compress
+            const offscreen = document.createElement('canvas');
+            offscreen.width = finalWidth;
+            offscreen.height = finalHeight;
+            const ctx = offscreen.getContext('2d');
+            ctx.drawImage(img, 0, 0, finalWidth, finalHeight);
+            finalBase64 = offscreen.toDataURL('image/jpeg', 0.8);
+        }
+
+        // Final check for 2MB limit (approx base64 string length)
+        if (finalBase64.length > MAX_FILE_SIZE * 1.37) {
+            showToast('Pasted image is too large (over 2MB).');
+            return;
+        }
+
+        // 4. Compute placement position (center of 1920x1080 minus half dimensions)
+        const placementX = Math.round(960 - finalWidth / 2);
+        const placementY = Math.round(540 - finalHeight / 2);
+
+        // Generate temporary ID
+        const generateUUID = () => {
+            try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) {}
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+        };
+        const tempId = 'temp-' + generateUUID();
+
+        // 5. Construct op: add payload
+        const addOp = {
+            type: 'op',
+            op: 'add',
+            object: {
+                obj_type: 'image',
+                z_index: window.CollabCanvas.objects.size,
+                color: '#000000',
+                stroke_width: 0,
+                properties: {
+                    x: placementX,
+                    y: placementY,
+                    width: finalWidth,
+                    height: finalHeight,
+                    image_data: finalBase64,
+                    base64: finalBase64, // Local & broadcast optimization
+                    original_filename: "clipboard_paste.png"
+                },
+                obj_id: tempId,
+                created_by: window.AppState.userId || 'local',
+                created_at: new Date().toISOString()
+            }
+        };
+
+        // 6. Optimistic update and dispatch
+        window.CollabCanvas.addOptimisticObject(addOp.object);
+
+        if (window.network && window.network.isIdentified) {
+            window.network.send(addOp);
+            if (window.UndoRedoManager) {
+                window.UndoRedoManager.pushAction(addOp);
+            }
+        }
+
+        // 7. Auto-select the newly pasted image
+        if (typeof window.CollabCanvas.selectObject === 'function') {
+            setActiveTool('select');
+            window.CollabCanvas.selectObject(tempId);
+            
+            // Sync UI state for selection
+            const fillToggleBtn = document.getElementById('tool-fill-toggle');
+            const strokeToggleBtn = document.getElementById('tool-stroke-toggle');
+            if (fillToggleBtn) {
+                window.AppState.fillEnabled = false;
+                fillToggleBtn.classList.remove('active');
+            }
+            if (strokeToggleBtn) {
+                window.AppState.strokeEnabled = false;
+                strokeToggleBtn.classList.remove('active');
+            }
+        }
+
+    } catch (err) {
+        console.error('[Clipboard] Failed to process pasted image:', err);
+        showToast('Failed to paste image.');
+    }
 });
 
 // ---------------------------------------------------------------------------
@@ -917,6 +1269,76 @@ DOM.importFile.addEventListener('change', (e) => {
     reader.readAsText(file);
     e.target.value = ''; // Reset
 });
+
+// ---------------------------------------------------------------------------
+// Room & UI Helpers
+// ---------------------------------------------------------------------------
+
+// Copy room code
+if (DOM.toolbarRoomName) {
+    DOM.toolbarRoomName.style.cursor = 'pointer';
+    DOM.toolbarRoomName.title = 'Copy room code';
+    DOM.toolbarRoomName.addEventListener('click', () => {
+        if (AppState.roomId) {
+            navigator.clipboard.writeText(AppState.roomId).then(() => {
+                const originalText = DOM.toolbarRoomName.textContent;
+                DOM.toolbarRoomName.textContent = 'Copied!';
+                setTimeout(() => {
+                    DOM.toolbarRoomName.textContent = originalText;
+                }, 2000);
+            });
+        }
+    });
+}
+
+// Leave Room Flow
+if (DOM.leaveBtn) {
+    DOM.leaveBtn.addEventListener('click', () => {
+        DOM.moreOptionsDropdown.setAttribute('aria-hidden', 'true');
+        DOM.leaveModal.setAttribute('aria-hidden', 'false');
+    });
+
+    DOM.leaveCancelBtn.addEventListener('click', () => {
+        DOM.leaveModal.setAttribute('aria-hidden', 'true');
+    });
+
+    DOM.leaveProceedBtn.addEventListener('click', () => {
+        DOM.leaveModal.setAttribute('aria-hidden', 'true');
+        
+        // Disconnect from server
+        if (window.network) {
+            window.network.disconnect();
+        }
+        
+        // Clear local state
+        AppState.roomId = null;
+        AppState.isHost = false;
+        
+        // Clear canvas
+        if (window.CollabCanvas) {
+            if (typeof window.CollabCanvas.clearSelection === 'function') window.CollabCanvas.clearSelection();
+            if (window.CollabCanvas.objects) window.CollabCanvas.objects.clear();
+            if (window.CollabCanvas.pendingAdds) window.CollabCanvas.pendingAdds = [];
+        }
+        
+        // Clear undo/redo
+        if (window.UndoRedoManager) {
+            window.UndoRedoManager.undoStack = [];
+            window.UndoRedoManager.redoStack = [];
+            window.UndoRedoManager.updateStatus();
+        }
+        
+        // Update UI
+        DOM.roomModal.setAttribute('aria-hidden', 'false');
+        DOM.statusRoom.textContent = 'No room';
+        DOM.statusConnection.innerHTML = '<span class="status-bar__dot"></span>Disconnected';
+        DOM.statusConnection.className = 'status-bar__indicator status-bar__indicator--disconnected';
+        DOM.statusUsers.textContent = '0 users';
+        DOM.participantList.innerHTML = '';
+        DOM.participants.innerHTML = '';
+        showToast('Left the room.');
+    });
+}
 
 // ---------------------------------------------------------------------------
 // UI Initialization

@@ -110,6 +110,8 @@
                     <div class="dropdown" id="more-options-dropdown" aria-hidden="true">
                         <button id="menu-export-collab" class="dropdown__item">Export .collab</button>
                         <button id="menu-import-collab" class="dropdown__item">Import .collab</button>
+                        <div class="dropdown__divider" style="height: 1px; background: rgba(255,255,255,0.1); margin: 4px 0;"></div>
+                        <button id="menu-leave-room" class="dropdown__item" style="color: #ff4d4f; font-weight: 500;">Leave Room</button>
                     </div>
                     <input type="file" id="import-file" accept=".collab,.json" class="sr-only">
                 </div>
@@ -142,7 +144,7 @@
                 </span>
             </div>
             <div class="status-bar__section status-bar__section--center">
-                <span id="status-room" class="status-bar__room">No room</span>
+                <span id="status-room" class="status-bar__room" style="cursor: pointer;" title="Click to copy room code">No room</span>
             </div>
             <div class="status-bar__section status-bar__section--right">
                 <span id="status-save" class="status-bar__save">—</span>
@@ -154,22 +156,49 @@
         <div id="room-modal" class="modal" aria-hidden="true">
             <div class="modal__backdrop"></div>
             <div class="modal__card">
-                <h2 class="modal__title">Join CollabBoard</h2>
-                <p class="modal__subtitle">Enter your name and a room code to get started.</p>
+                <div class="modal__tabs">
+                    <button id="modal-tab-create" class="modal__tab active">Create</button>
+                    <button id="modal-tab-join" class="modal__tab">Join</button>
+                </div>
                 <div class="modal__form">
                     <div class="modal__field">
                         <label for="modal-username" class="modal__label">Display Name</label>
                         <input type="text" id="modal-username" class="modal__input" placeholder="e.g. Aiko" maxlength="32" autocomplete="off">
                     </div>
-                    <div class="modal__field">
+                    <div class="modal__field" id="modal-field-room-code" style="display: none;">
                         <label for="modal-room-code" class="modal__label">Room Code</label>
                         <input type="text" id="modal-room-code" class="modal__input" placeholder="e.g. A1B2C3" maxlength="6" autocomplete="off">
                     </div>
                     <p id="modal-error" class="modal__error" aria-live="polite"></p>
                     <div class="modal__actions">
-                        <button id="modal-join-btn" class="modal__btn modal__btn--primary">Join Room</button>
-                        <button id="modal-create-btn" class="modal__btn modal__btn--secondary">Create New Room</button>
+                        <button id="modal-create-btn" class="modal__btn modal__btn--primary">Create Room</button>
+                        <button id="modal-join-btn" class="modal__btn modal__btn--primary" style="display: none;">Join Room</button>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LEAVE MODAL -->
+        <div id="leave-modal" class="modal" aria-hidden="true">
+            <div class="modal__backdrop"></div>
+            <div class="modal__card" style="max-width: 400px; text-align: center;">
+                <h2 class="modal__title">Leave Room?</h2>
+                <p class="modal__subtitle" style="margin-bottom: 24px;">Are you sure you want to leave this room? You will need the room code to rejoin.</p>
+                <div style="display: flex; gap: 12px; justify-content: center;">
+                    <button id="leave-cancel-btn" class="modal__btn modal__btn--secondary" style="flex: 1;">Cancel</button>
+                    <button id="leave-proceed-btn" class="modal__btn modal__btn--primary" style="flex: 1; background-color: #dc3545; border-color: #dc3545;">Leave</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- EASTER EGG MODAL -->
+        <div id="easter-egg-modal" class="modal" aria-hidden="true">
+            <div class="modal__backdrop"></div>
+            <div class="modal__card" style="max-width: 400px; text-align: center;">
+                <h2 class="modal__title">🎉 Easter Egg Found!</h2>
+                <p class="modal__subtitle" style="margin-bottom: 24px;">iya iya sherlock, kamu berhasil nemu easter egg-nya. selamat yh. sana lanjut gambar</p>
+                <div style="display: flex; gap: 12px; justify-content: center;">
+                    <button id="easter-egg-close-btn" class="modal__btn modal__btn--primary" style="flex: 1;">Close</button>
                 </div>
             </div>
         </div>
@@ -180,6 +209,7 @@
         <div id="toast" class="toast" aria-hidden="true"></div>
     </div>
     <script src="js/network.js"></script>
+    <script src="js/geometry.js"></script>
     <script src="js/canvas.js"></script>
     <script src="js/tools.js"></script>
     <script src="js/undo.js"></script>
