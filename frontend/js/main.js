@@ -857,6 +857,156 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Phase 2, Sprint 4: Clipboard Paste Handler
+// ---------------------------------------------------------------------------
+document.addEventListener('paste', async (e) => {
+    // 1. Prevent interception if user is typing
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) {
+        return;
+    }
+
+    // 2. Check if we are in a room
+    if (!window.AppState.roomId) return;
+
+    // 3. Find the image item in clipboard
+    const items = e.clipboardData.items;
+    let imageFile = null;
+    for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+            imageFile = items[i].getAsFile();
+            break;
+        }
+    }
+
+    if (!imageFile) return;
+
+    e.preventDefault();
+
+    try {
+        const MAX_WIDTH = 600;
+        const MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
+        
+        // Read file to data URL
+        const reader = new FileReader();
+        const base64Data = await new Promise((resolve, reject) => {
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(imageFile);
+        });
+
+        // Load into an Image object
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = base64Data;
+        });
+
+        let finalBase64 = base64Data;
+        let finalWidth = img.naturalWidth;
+        let finalHeight = img.naturalHeight;
+
+        // Scale if wider than 600px
+        if (finalWidth > MAX_WIDTH) {
+            const scale = MAX_WIDTH / finalWidth;
+            finalWidth = MAX_WIDTH;
+            finalHeight = Math.round(finalHeight * scale);
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = finalWidth;
+            offscreen.height = finalHeight;
+            const ctx = offscreen.getContext('2d');
+            ctx.drawImage(img, 0, 0, finalWidth, finalHeight);
+            finalBase64 = offscreen.toDataURL('image/jpeg', 0.8);
+        } else if (imageFile.size > MAX_FILE_SIZE) {
+            // Even if not wider than 600px, if it's over 2MB, try to compress
+            const offscreen = document.createElement('canvas');
+            offscreen.width = finalWidth;
+            offscreen.height = finalHeight;
+            const ctx = offscreen.getContext('2d');
+            ctx.drawImage(img, 0, 0, finalWidth, finalHeight);
+            finalBase64 = offscreen.toDataURL('image/jpeg', 0.8);
+        }
+
+        // Final check for 2MB limit (approx base64 string length)
+        if (finalBase64.length > MAX_FILE_SIZE * 1.37) {
+            showToast('Pasted image is too large (over 2MB).');
+            return;
+        }
+
+        // 4. Compute placement position (center of 1920x1080 minus half dimensions)
+        const placementX = Math.round(960 - finalWidth / 2);
+        const placementY = Math.round(540 - finalHeight / 2);
+
+        // Generate temporary ID
+        const generateUUID = () => {
+            try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) {}
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+            });
+        };
+        const tempId = 'temp-' + generateUUID();
+
+        // 5. Construct op: add payload
+        const addOp = {
+            type: 'op',
+            op: 'add',
+            object: {
+                obj_type: 'image',
+                z_index: window.CollabCanvas.objects.size,
+                color: '#000000',
+                stroke_width: 0,
+                properties: {
+                    x: placementX,
+                    y: placementY,
+                    width: finalWidth,
+                    height: finalHeight,
+                    image_data: finalBase64,
+                    base64: finalBase64, // Local & broadcast optimization
+                    original_filename: "clipboard_paste.png"
+                },
+                obj_id: tempId,
+                created_by: window.AppState.userId || 'local',
+                created_at: new Date().toISOString()
+            }
+        };
+
+        // 6. Optimistic update and dispatch
+        window.CollabCanvas.addOptimisticObject(addOp.object);
+
+        if (window.network && window.network.isIdentified) {
+            window.network.send(addOp);
+            if (window.UndoRedoManager) {
+                window.UndoRedoManager.pushAction(addOp);
+            }
+        }
+
+        // 7. Auto-select the newly pasted image
+        if (typeof window.CollabCanvas.selectObject === 'function') {
+            setActiveTool('select');
+            window.CollabCanvas.selectObject(tempId);
+            
+            // Sync UI state for selection
+            const fillToggleBtn = document.getElementById('tool-fill-toggle');
+            const strokeToggleBtn = document.getElementById('tool-stroke-toggle');
+            if (fillToggleBtn) {
+                window.AppState.fillEnabled = false;
+                fillToggleBtn.classList.remove('active');
+            }
+            if (strokeToggleBtn) {
+                window.AppState.strokeEnabled = false;
+                strokeToggleBtn.classList.remove('active');
+            }
+        }
+
+    } catch (err) {
+        console.error('[Clipboard] Failed to process pasted image:', err);
+        showToast('Failed to paste image.');
+    }
+});
+
+// ---------------------------------------------------------------------------
 // Canvas Resize Handler
 // ---------------------------------------------------------------------------
 function handleResize() {

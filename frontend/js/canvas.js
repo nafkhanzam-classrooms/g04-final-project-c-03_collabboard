@@ -61,6 +61,12 @@ class CanvasRenderer {
         this.tombstones = new Set();
 
         /**
+         * Remote selections map: user_id -> { obj_id, username }
+         * @type {Map<string, {obj_id: string, username: string}>}
+         */
+        this.remoteSelections = new Map();
+
+        /**
          * Selection State (Phase 2, Sprint 3)
          */
         this.selectedObjectId = null;
@@ -87,6 +93,8 @@ class CanvasRenderer {
             window.network.on('canvas_snapshot', (data) => this.handleSnapshot(data));
             window.network.on('op_broadcast', (data) => this.handleOpBroadcast(data));
             window.network.on('op_ack', (data) => this.handleOpAck(data));
+            window.network.on('selection_update', (data) => this.handleSelectionUpdate(data));
+            window.network.on('user_left', (data) => this.remoteSelections.delete(data.user_id));
         }
 
         // Start the render loop
@@ -190,6 +198,11 @@ class CanvasRenderer {
                     if (window.UndoRedoManager) {
                         window.UndoRedoManager.updateObjectId(tempId, data.obj_id);
                     }
+                    
+                    // If this object was selected locally, update the selection ID
+                    if (this.selectedObjectId === tempId) {
+                        this.selectObject(data.obj_id);
+                    }
                 }
             }
         } else {
@@ -232,17 +245,36 @@ class CanvasRenderer {
         }
     }
 
+    handleSelectionUpdate(data) {
+        if (data.user_id === window.AppState?.userId) return;
+        if (data.obj_id) {
+            this.remoteSelections.set(data.user_id, { obj_id: data.obj_id, username: data.username });
+        } else {
+            this.remoteSelections.delete(data.user_id);
+        }
+    }
+
     // --- Selection Helpers (Phase 2, Sprint 3) ---
 
     selectObject(objId) { 
-        this.selectedObjectId = objId; 
+        if (this.selectedObjectId !== objId) {
+            this.selectedObjectId = objId; 
+            if (window.network && window.network.isIdentified && window.AppState?.roomId) {
+                window.network.send({ type: 'selection_update', obj_id: objId });
+            }
+        }
     }
     
     clearSelection() { 
-        this.selectedObjectId = null; 
-        this.selectedHandle = null; 
-        this.isResizing = false;
-        this.resizeStart = null;
+        if (this.selectedObjectId !== null) {
+            this.selectedObjectId = null; 
+            this.selectedHandle = null; 
+            this.isResizing = false;
+            this.resizeStart = null;
+            if (window.network && window.network.isIdentified && window.AppState?.roomId) {
+                window.network.send({ type: 'selection_update', obj_id: null });
+            }
+        }
     }
     
     getSelectedObject() { 
@@ -282,6 +314,16 @@ class CanvasRenderer {
             } else {
                 // Object was deleted remotely
                 this.clearSelection();
+            }
+        }
+
+        // 4.5 Draw remote selections
+        for (const [userId, selection] of this.remoteSelections.entries()) {
+            const selectedObj = this.objects.get(selection.obj_id);
+            if (selectedObj && !selectedObj.is_deleted) {
+                this.drawRemoteSelection(selectedObj, selection.username);
+            } else if (!selectedObj) {
+                this.remoteSelections.delete(userId);
             }
         }
 
@@ -499,6 +541,49 @@ class CanvasRenderer {
             this.ctx.fill();
             this.ctx.stroke();
         }
+
+        this.ctx.restore();
+    }
+
+    /**
+     * Phase 2, Sprint 4.5: Draw remote selection bounding box and name tag.
+     */
+    drawRemoteSelection(obj, username) {
+        if (!window.geometry) return;
+        
+        // Reuse hue logic
+        const hue = Array.from(username).reduce((acc, ch) => acc + ch.charCodeAt(0), 0) % 360;
+        const color = `hsl(${hue}, 70%, 50%)`;
+
+        this.ctx.save();
+        
+        const bbox = window.geometry.getBoundingBox(obj, this.ctx);
+        
+        // Bounding box outline
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 2;
+        this.ctx.setLineDash([]);
+        this.ctx.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
+        
+        // Name tag background
+        this.ctx.font = '12px Inter, system-ui, sans-serif';
+        const textWidth = this.ctx.measureText(username).width;
+        const padX = 6;
+        const tagHeight = 20;
+        
+        this.ctx.fillStyle = color;
+        if (this.ctx.roundRect) {
+            this.ctx.beginPath();
+            this.ctx.roundRect(bbox.x, bbox.y - tagHeight, textWidth + padX * 2, tagHeight, [4, 4, 0, 0]);
+            this.ctx.fill();
+        } else {
+            this.ctx.fillRect(bbox.x, bbox.y - tagHeight, textWidth + padX * 2, tagHeight);
+        }
+        
+        // Name tag text
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(username, bbox.x + padX, bbox.y - tagHeight / 2);
 
         this.ctx.restore();
     }
