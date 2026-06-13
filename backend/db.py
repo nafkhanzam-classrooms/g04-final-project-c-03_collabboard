@@ -1155,7 +1155,7 @@ async def insert_image(
 
 async def delete_stale_rooms() -> List[str]:
     """
-    Delete rooms inactive for > 30 days and return their room_ids.
+    Delete rooms inactive for > 24 hours and return their room_ids.
     Used by the cleanup_loop.
     """
     if pool is None:
@@ -1165,7 +1165,7 @@ async def delete_stale_rooms() -> List[str]:
         rows = await conn.fetch(
             """
             DELETE FROM rooms
-            WHERE last_activity < now() - INTERVAL '30 days'
+            WHERE last_activity < now() - INTERVAL '24 hours'
             RETURNING room_id
             """
         )
