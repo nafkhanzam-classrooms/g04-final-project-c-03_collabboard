@@ -81,7 +81,10 @@ jobs:
             # Pull new images
             docker compose -f infra/docker-compose.yml pull backend-1 backend-2
             
-            # Restart containers (zero-downtime rolling restart)
+            # Ensure infrastructure (Nginx, DB, Redis) is running
+            docker compose -f infra/docker-compose.yml up -d nginx postgres redis certbot
+            
+            # Restart backend containers (zero-downtime rolling restart)
             docker compose -f infra/docker-compose.yml up -d --no-deps backend-1
             sleep 10
             docker compose -f infra/docker-compose.yml up -d --no-deps backend-2
