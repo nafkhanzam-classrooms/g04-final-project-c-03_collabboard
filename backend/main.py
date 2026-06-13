@@ -646,6 +646,33 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
+                # Sprint 4.5 (M1/M2) — remote selection presence relay
+                if msg_type == "selection_update":
+                    if not client.room_id:
+                        continue
+                    
+                    broadcast = {
+                        "type": "selection_update",
+                        "user_id": client.user_id,
+                        "username": client.username,
+                        "obj_id": data.get("obj_id")
+                    }
+                    
+                    # Local broadcast (exclude sender)
+                    await manager.broadcast_to_room(
+                        client.room_id,
+                        broadcast,
+                        exclude_user_id=client.user_id,
+                    )
+                    # Cross-server relay via Redis pub/sub
+                    await redis_client.publish_to_room(
+                        room_id=client.room_id,
+                        server_id=SERVER_ID,
+                        msg_type="selection_update",
+                        payload=broadcast,
+                    )
+                    continue
+
                 # Day 6+ — save/load, etc.
                 if msg_type in (
                     "save_canvas", "load_canvas", "image_request",

@@ -701,6 +701,35 @@ ul {
     transform: translateY(0);
 }
 
+.modal__tabs {
+    display: flex;
+    gap: var(--space-xl);
+    margin-bottom: var(--space-xl);
+    border-bottom: 2px solid var(--color-border);
+}
+
+.modal__tab {
+    padding: var(--space-sm) 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.modal__tab:hover {
+    color: var(--color-text-primary);
+}
+
+.modal__tab.active {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+}
+
 .modal__title {
     font-size: 20px;
     font-weight: 700;
